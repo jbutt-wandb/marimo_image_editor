@@ -47,7 +47,8 @@ def _():
 
 
 @app.cell
-def _(mo, pipe_is_loaded):
+def _(get_refresh, mo, pipe_is_loaded):
+    get_refresh()
     mo.md(
         f"""
     # Qwen Image Studio
