@@ -56,7 +56,7 @@ echo "Node: $NODE ($NODE_IP)"
 ssh "$SSH_HOST" "srun --jobid=$JOBID --overlap pkill -f '$REMOTE_DIR/.venv/bin/marimo' || true"
 AUTH=""
 [[ "$MODE" == edit ]] && AUTH="--no-token"   # tunnel is the auth boundary
-echo "Starting marimo $MODE…"
+echo "Starting marimo ${MODE}..."
 ssh "$SSH_HOST" "nohup srun --jobid=$JOBID --overlap bash -c 'source $REMOTE_DIR/.venv/bin/activate && export HF_HOME=$DATA_DIR/hf && cd $REMOTE_DIR && exec marimo $MODE app.py --host $NODE_IP --port $PORT --headless --watch $AUTH' > $DATA_DIR/marimo.log 2>&1 &"
 
 echo -n "Waiting for marimo"
