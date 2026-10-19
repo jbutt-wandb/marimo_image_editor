@@ -7,7 +7,6 @@ app = marimo.App(width="medium", app_title="Image Studio")
 @app.cell
 def _():
     import io
-    import json
 
     import marimo as mo
     from PIL import Image
@@ -19,7 +18,6 @@ def _():
         RESOLUTIONS,
         canvas_for_image,
         compose_region_prompt,
-        list_outputs,
         marked_from_mask,
         marked_from_strokes,
         pipe_is_loaded,
@@ -39,8 +37,6 @@ def _():
         compose_region_prompt,
         init_telemetry,
         io,
-        json,
-        list_outputs,
         marked_from_mask,
         marked_from_strokes,
         mo,
@@ -95,7 +91,7 @@ def _(mo):
 
 
 @app.cell
-def _(mo):
+def _(io, mo):
     def parse_seed(text):
         """'' -> None (random); otherwise int or a user-facing stop."""
         text = text.strip()
@@ -107,18 +103,29 @@ def _(mo):
             mo.stop(True, mo.md(f"⚠️ seed must be an integer, got `{text}`"))
 
     def upload_to_image(upload_file):
-        import io as _io
-
         from PIL import Image as _Image
 
-        return _Image.open(_io.BytesIO(upload_file.contents))
+        return _Image.open(io.BytesIO(upload_file.contents))
 
-    def show_results(saved, recipe):
-        """Inline display for a batch of (path, recipe) results."""
-        return mo.vstack(
-            [mo.image(str(p)) for p, _ in saved]
-            + [mo.md(f"seed `{recipe['seed']}` · " + " · ".join(f"`{p.name}`" for p, _ in saved))]
-        )
+    def show_results(images, recipe):
+        """Inline display of generated PIL images with download buttons.
+        Images live in Weave (traces + dataset), not on disk."""
+        items = []
+        for i, im in enumerate(images):
+            buf = io.BytesIO()
+            im.save(buf, "PNG")
+            items.append(mo.image(im))
+            items.append(
+                mo.download(
+                    data=buf.getvalue(),
+                    filename=f"{recipe['mode']}-seed{recipe['seed']}-{i}.png",
+                    label="Download",
+                )
+            )
+        caption = f"seed `{recipe['seed']}`"
+        if recipe.get("enhanced"):
+            caption += " · prompt enhanced"
+        return mo.vstack(items + [mo.md(caption)])
     return parse_seed, show_results, upload_to_image
 
 
@@ -423,7 +430,7 @@ async def _(
     mo.stop(not create_btn.value)
     mo.stop(not create_prompt.value.strip(), mo.md("⚠️ enter a prompt first"))
     with mo.status.spinner("Generating…"):
-        _saved, _recipe = await studio.generate(
+        _imgs, _recipe = await studio.generate(
             mode="create",
             prompt=create_prompt.value,
             params=dict(
@@ -441,7 +448,7 @@ async def _(
             session_id=session_id,
         )
     set_refresh(lambda n: n + 1)
-    show_results(_saved, _recipe)
+    show_results(_imgs, _recipe)
     return
 
 
@@ -471,7 +478,7 @@ async def _(
     mo.stop(not edit_prompt.value.strip(), mo.md("⚠️ enter an instruction first"))
     _images = [upload_to_image(f) for f in edit_upload.value]
     with mo.status.spinner("Editing…"):
-        _saved, _recipe = await studio.generate(
+        _imgs, _recipe = await studio.generate(
             mode="edit",
             prompt=edit_prompt.value,
             images=_images,
@@ -488,7 +495,7 @@ async def _(
             recipe_extra={"inputs": [f.name for f in edit_upload.value]},
         )
     set_refresh(lambda n: n + 1)
-    show_results(_saved, _recipe)
+    show_results(_imgs, _recipe)
     return
 
 
@@ -529,7 +536,7 @@ async def _(
     _annotated = marked_from_mask(region_base, _mask)
     _refs = [upload_to_image(f) for f in (region_refs_upload.value or [])]
     with mo.status.spinner("Editing region…"):
-        _saved, _recipe = await studio.generate(
+        _imgs, _recipe = await studio.generate(
             mode="region",
             prompt=region_prompt.value,
             images=[_annotated] + _refs,
@@ -546,7 +553,7 @@ async def _(
             recipe_extra={"n_refs": len(_refs)},
         )
     set_refresh(lambda n: n + 1)
-    show_results(_saved, _recipe)
+    show_results(_imgs, _recipe)
     return
 
 
@@ -596,7 +603,7 @@ async def _(
     )
     _prompt = compose_region_prompt(_instructions)
     with mo.status.spinner("Editing regions…"):
-        _saved, _recipe = await studio.generate(
+        _imgs, _recipe = await studio.generate(
             mode="multi-region",
             prompt=_prompt,
             images=[_annotated],
@@ -612,45 +619,16 @@ async def _(
             session_id=session_id,
         )
     set_refresh(lambda n: n + 1)
-    show_results(_saved, _recipe)
+    show_results(_imgs, _recipe)
     return
 
 
 @app.cell
-def _(get_refresh, json, list_outputs, mo):
-    get_refresh()
-    _items = list_outputs()[:24]
-    if _items:
-        _cards = [
-            mo.vstack(
-                [
-                    mo.image(str(_png), width=280, rounded=True),
-                    mo.accordion(
-                        {
-                            _png.name: mo.vstack(
-                                [
-                                    mo.md(f"```json\n{json.dumps(_recipe, indent=2)}\n```"),
-                                    mo.download(
-                                        data=_png.read_bytes(),
-                                        filename=_png.name,
-                                        label="Download",
-                                    ),
-                                ]
-                            )
-                        }
-                    ),
-                ]
-            )
-            for _png, _recipe in _items
-        ]
-        _gallery = mo.vstack(
-            [mo.md("## Gallery"), mo.hstack(_cards, wrap=True, justify="start", gap=1)]
-        )
-    else:
-        _gallery = mo.vstack(
-            [mo.md("## Gallery"), mo.md("_Nothing generated yet._")]
-        )
-    _gallery
+def _(WEAVE_PROJECT, mo):
+    mo.md(
+        f"_Generated images are not stored on the cluster — every generation is "
+        f"traced and archived in [Weave](https://wandb.ai/{WEAVE_PROJECT}/weave)._"
+    )
     return
 
 

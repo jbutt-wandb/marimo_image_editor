@@ -7,6 +7,7 @@ decorators elsewhere in the package are safe either way.
 
 import logging
 import os
+import sys
 
 WEAVE_PROJECT = "wandb-smle/jb_image_editing_tool"
 TRACE_THUMB_SIDE = 1024  # max image side logged into traces (server caps requests)
@@ -14,13 +15,29 @@ TRACE_THUMB_SIDE = 1024  # max image side logged into traces (server caps reques
 _initialized = False
 
 
+def setup_logging():
+    """Stage logging for the terminal (ends up in marimo.log). Idempotent."""
+    pkg_logger = logging.getLogger("qwen2_1")
+    if not pkg_logger.handlers:
+        handler = logging.StreamHandler(sys.stdout)
+        handler.setFormatter(
+            logging.Formatter("%(asctime)s %(levelname)s %(name)s | %(message)s")
+        )
+        pkg_logger.addHandler(handler)
+        pkg_logger.setLevel(logging.INFO)
+        pkg_logger.propagate = False
+    return pkg_logger
+
+
 def init_telemetry():
     """Init weave once if credentials exist. Returns True when tracing is on.
     Fail-open: any init error leaves the app running untraced."""
     global _initialized
+    setup_logging()
     if _initialized:
         return True
     if not os.environ.get("WANDB_API_KEY"):
+        logging.getLogger(__name__).info("telemetry off (no WANDB_API_KEY)")
         return False
     try:
         logging.getLogger("weave").setLevel(logging.ERROR)
@@ -41,6 +58,7 @@ def init_telemetry():
 
         set_trace_processors([WeaveTracingProcessor()])
         _initialized = True
+        logging.getLogger(__name__).info("telemetry on -> %s", WEAVE_PROJECT)
         return True
     except Exception:
         logging.getLogger(__name__).exception("weave init failed; tracing off")
