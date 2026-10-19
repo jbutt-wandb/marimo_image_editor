@@ -1,9 +1,11 @@
-# Qwen Image Studio
+# Image Studio
 
-A [marimo](https://marimo.io) app for interacting with **Qwen-Image-2.1** —
-text-to-image, instruction editing, multi-reference composition, and
+A [marimo](https://marimo.io) app for working with instruction-driven image
+models — text-to-image, instruction editing, multi-reference composition, and
 draw-on-image region editing — running on a CoreWeave H100 and used locally
-through an SSH tunnel.
+through an SSH tunnel. The currently hosted model is **Qwen-Image-2.1**; the
+UI and library are structured so other models can slot in behind the same
+interface (`src/qwen2_1/model.py` is the only model-specific layer).
 
 ## Layout
 
@@ -39,7 +41,7 @@ Notes:
 - The venv must stay on uv-managed Python (3.10): compute nodes lack the dev
   headers system Python needs for Triton's JIT.
 
-## Model cheat-sheet
+## Current model: Qwen-Image-2.1
 
 One `QwenImage21Pipeline` serves every mode; `image=` selects it
 (none = T2I, one = edit, list ≤ 10 = multi-reference). There is **no mask

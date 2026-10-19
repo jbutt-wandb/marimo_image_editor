@@ -9,7 +9,14 @@ from qwen2_1.masks import (
     strokes_by_color,
     strokes_to_mask,
 )
-from qwen2_1.model import ASPECT_RATIOS, load_pipe, pipe_is_loaded, run_pipe
+from qwen2_1.model import (
+    ASPECT_RATIOS,
+    MODEL_ID,
+    RESOLUTIONS,
+    load_pipe,
+    pipe_is_loaded,
+    run_pipe,
+)
 from qwen2_1.recipes import list_outputs, save_output
 
 

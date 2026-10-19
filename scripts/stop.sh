@@ -22,7 +22,7 @@ JOBID=""
 [[ -z "$JOBID" ]] && JOBID=$(ssh "$SSH_HOST" "squeue --me --name=jbutt-interactive -h -o %A -t RUNNING | head -1")
 
 if [[ -n "$JOBID" ]]; then
-  ssh "$SSH_HOST" "srun --jobid=$JOBID --overlap pkill -f '$REMOTE_DIR/.venv/bin/marimo' || true" \
+  ssh "$SSH_HOST" "srun --jobid=$JOBID --overlap pkill -f 'bin/marimo' || true" \
     && echo "marimo stopped."
   if [[ $RELEASE == 1 ]]; then
     ssh "$SSH_HOST" "scancel $JOBID" && echo "Job $JOBID cancelled."

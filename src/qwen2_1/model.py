@@ -21,6 +21,9 @@ ASPECT_RATIOS = {
     "9:16": (1536, 2752),
 }
 
+# Dimension divisors stay valid at half scale (all multiples of 16).
+RESOLUTIONS = {"2K": 1.0, "1K": 0.5}
+
 RGBA_PROMPT_TEMPLATE = (
     "This is an RGBA image with transparency. {prompt}. "
     "The image has alpha channel and the background is transparent."
@@ -56,14 +59,19 @@ def run_pipe(
     true_cfg_scale=1.0,
     negative_prompt="",
     aspect=None,
+    resolution="2K",
     seed=None,
     transparent=False,
+    num_images=1,
+    use_kv_cache=True,
 ):
-    """Run any mode; returns (PIL image, recipe dict).
+    """Run any mode; returns (list of PIL images, recipe dict).
 
     images: None | PIL.Image | list[PIL.Image] (first = edit target, rest refs)
-    aspect: key into ASPECT_RATIOS; ignored in edit modes (output inherits input size)
+    aspect/resolution: key into ASPECT_RATIOS / RESOLUTIONS; ignored in edit
+        modes (output inherits input size)
     seed: None -> random (the drawn seed is recorded in the recipe)
+    num_images: variations per run (same prompt, consecutive noise draws)
     """
     import torch
 
@@ -77,6 +85,8 @@ def run_pipe(
     kwargs = dict(
         prompt=prompt,
         num_inference_steps=int(steps),
+        num_images_per_prompt=int(num_images),
+        use_kv_cache=bool(use_kv_cache),
         generator=torch.Generator(pipe.device.type).manual_seed(int(seed)),
     )
 
@@ -94,21 +104,29 @@ def run_pipe(
         "steps": int(steps),
         "seed": int(seed),
         "transparent": transparent,
+        "num_images": int(num_images),
+        "use_kv_cache": bool(use_kv_cache),
     }
 
     if images is None:
-        width, height = ASPECT_RATIOS[aspect or "1:1"]
+        scale = RESOLUTIONS[resolution]
+        width, height = (round(d * scale) for d in ASPECT_RATIOS[aspect or "1:1"])
         kwargs.update(width=width, height=height)
-        recipe.update(mode="create", aspect=aspect or "1:1", width=width, height=height)
+        recipe.update(
+            mode="create",
+            aspect=aspect or "1:1",
+            resolution=resolution,
+            width=width,
+            height=height,
+        )
     else:
         if not isinstance(images, (list, tuple)):
             images = [images]
         if len(images) > 10:
-            raise ValueError("Qwen-Image-2.1 supports at most 10 input images")
+            raise ValueError("the model supports at most 10 input images")
         kwargs["image"] = [im.convert("RGBA") for im in images]
         if len(kwargs["image"]) == 1:
             kwargs["image"] = kwargs["image"][0]
         recipe.update(mode="edit", n_images=len(images))
 
-    image = pipe(**kwargs).images[0]
-    return image, recipe
+    return pipe(**kwargs).images, recipe

@@ -53,7 +53,10 @@ NODE_IP=$(ssh "$SSH_HOST" "scontrol show node $NODE" | sed -n 's/.*NodeAddr=\([^
 echo "Node: $NODE ($NODE_IP)"
 
 # --- (re)start marimo inside the job -----------------------------------------
-ssh "$SSH_HOST" "srun --jobid=$JOBID --overlap pkill -f '$REMOTE_DIR/.venv/bin/marimo' || true"
+# NB: pkill -f patterns are regexes — keep them metachar-free (the project
+# path contains '+', which silently never matches)
+ssh "$SSH_HOST" "srun --jobid=$JOBID --overlap pkill -f 'bin/marimo' || true"
+sleep 3  # let the port free up
 AUTH=""
 [[ "$MODE" == edit ]] && AUTH="--no-token"   # tunnel is the auth boundary
 echo "Starting marimo ${MODE}..."
@@ -74,7 +77,7 @@ if [[ -f "$STATE_DIR/tunnel.pid" ]]; then
   kill "$(cat "$STATE_DIR/tunnel.pid")" 2>/dev/null || true
   rm -f "$STATE_DIR/tunnel.pid"
 fi
-ssh -N -L "$PORT:$NODE_IP:$PORT" "$SSH_HOST" &
+ssh -N -L "$PORT:$NODE_IP:$PORT" "$SSH_HOST" >/dev/null 2>&1 &
 TUNNEL_PID=$!
 disown "$TUNNEL_PID"
 echo "$TUNNEL_PID" > "$STATE_DIR/tunnel.pid"

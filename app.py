@@ -1,7 +1,7 @@
 import marimo
 
 __generated_with = "0.13.15"
-app = marimo.App(width="medium", app_title="Qwen Image Studio")
+app = marimo.App(width="medium", app_title="Image Studio")
 
 
 @app.cell
@@ -15,6 +15,8 @@ def _():
     from qwen2_1 import (
         ANNOTATION_COLORS,
         ASPECT_RATIOS,
+        MODEL_ID,
+        RESOLUTIONS,
         canvas_for_image,
         compose_region_prompt,
         list_outputs,
@@ -30,6 +32,8 @@ def _():
         ANNOTATION_COLORS,
         ASPECT_RATIOS,
         Image,
+        MODEL_ID,
+        RESOLUTIONS,
         canvas_for_image,
         compose_region_prompt,
         io,
@@ -47,17 +51,25 @@ def _():
 
 
 @app.cell
-def _(get_refresh, mo, pipe_is_loaded):
+def _(MODEL_ID, get_refresh, mo, pipe_is_loaded):
     get_refresh()
-    mo.md(
-        f"""
-    # Qwen Image Studio
-
-    **Qwen-Image-2.1** on the cluster H100 · model status:
-    {"✅ loaded" if pipe_is_loaded() else "💤 loads on first generation (allow a couple of minutes)"}
-    """
+    model_select = mo.ui.dropdown(
+        options=[MODEL_ID], value=MODEL_ID, label="Model"
     )
-    return
+    mo.vstack(
+        [
+            mo.md(
+                f"""
+    # Image Studio
+
+    Generate and edit images with instruction-driven diffusion models · status:
+    {"✅ model loaded" if pipe_is_loaded() else "💤 model loads on first generation (allow a couple of minutes)"}
+    """
+            ),
+            model_select,
+        ]
+    )
+    return (model_select,)
 
 
 @app.cell
@@ -84,7 +96,14 @@ def _(mo):
         from PIL import Image as _Image
 
         return _Image.open(_io.BytesIO(upload_file.contents))
-    return parse_seed, upload_to_image
+
+    def show_results(saved, recipe):
+        """Inline display for a batch of (path, recipe) results."""
+        return mo.vstack(
+            [mo.image(str(p)) for p, _ in saved]
+            + [mo.md(f"seed `{recipe['seed']}` · " + " · ".join(f"`{p.name}`" for p, _ in saved))]
+        )
+    return parse_seed, show_results, upload_to_image
 
 
 @app.cell
@@ -99,6 +118,12 @@ def _(mo):
         label="Negative",
         full_width=True,
     )
+    variations = mo.ui.slider(
+        1, 4, value=1, label="Variations per run", show_value=True
+    )
+    kv_cache = mo.ui.checkbox(
+        value=True, label="KV cache (faster edits; uses extra VRAM)"
+    )
     settings_panel = mo.vstack(
         [
             mo.hstack([steps, seed_field], justify="start", gap=2),
@@ -112,26 +137,30 @@ def _(mo):
                                 "_Guidance and negative prompt act together: the model "
                                 "ignores either one on its own._"
                             ),
+                            mo.hstack([variations, kv_cache], justify="start", gap=2),
                         ]
                     )
                 }
             ),
         ]
     )
-    return guidance, negative, seed_field, settings_panel, steps
+    return guidance, kv_cache, negative, seed_field, settings_panel, steps, variations
 
 
 @app.cell
-def _(ASPECT_RATIOS, mo):
+def _(ASPECT_RATIOS, RESOLUTIONS, mo):
     create_prompt = mo.ui.text_area(
         placeholder="Describe the image you want…", label="Prompt", full_width=True, rows=4
     )
     create_aspect = mo.ui.dropdown(
         options=list(ASPECT_RATIOS), value="1:1", label="Aspect ratio"
     )
+    create_resolution = mo.ui.dropdown(
+        options=list(RESOLUTIONS), value="2K", label="Resolution"
+    )
     create_transparent = mo.ui.checkbox(label="Transparent background (RGBA)")
     create_btn = mo.ui.run_button(label="Generate", kind="success")
-    return create_aspect, create_btn, create_prompt, create_transparent
+    return create_aspect, create_btn, create_prompt, create_resolution, create_transparent
 
 
 @app.cell
@@ -267,6 +296,7 @@ def _(
     create_aspect,
     create_btn,
     create_prompt,
+    create_resolution,
     create_transparent,
     edit_btn,
     edit_prompt,
@@ -293,7 +323,11 @@ def _(
     _create_tab = mo.vstack(
         [
             create_prompt,
-            mo.hstack([create_aspect, create_transparent], justify="start", gap=2),
+            mo.hstack(
+                [create_aspect, create_resolution, create_transparent],
+                justify="start",
+                gap=2,
+            ),
             create_btn,
         ]
     )
@@ -340,8 +374,10 @@ def _(
     create_aspect,
     create_btn,
     create_prompt,
+    create_resolution,
     create_transparent,
     guidance,
+    kv_cache,
     mo,
     negative,
     parse_seed,
@@ -349,23 +385,28 @@ def _(
     save_output,
     seed_field,
     set_refresh,
+    show_results,
     steps,
+    variations,
 ):
     mo.stop(not create_btn.value)
     mo.stop(not create_prompt.value.strip(), mo.md("⚠️ enter a prompt first"))
     with mo.status.spinner("Generating…"):
-        _img, _recipe = run_pipe(
+        _imgs, _recipe = run_pipe(
             prompt=create_prompt.value,
             steps=steps.value,
             true_cfg_scale=guidance.value,
             negative_prompt=negative.value,
             aspect=create_aspect.value,
+            resolution=create_resolution.value,
             seed=parse_seed(seed_field.value),
             transparent=create_transparent.value,
+            num_images=variations.value,
+            use_kv_cache=kv_cache.value,
         )
-    _path, _recipe = save_output(_img, _recipe)
+    _saved = [save_output(_im, _recipe) for _im in _imgs]
     set_refresh(lambda n: n + 1)
-    mo.vstack([mo.image(str(_path)), mo.md(f"`{_path.name}` · seed `{_recipe['seed']}`")])
+    show_results(_saved, _recipe)
     return
 
 
@@ -375,6 +416,7 @@ def _(
     edit_prompt,
     edit_upload,
     guidance,
+    kv_cache,
     mo,
     negative,
     parse_seed,
@@ -382,8 +424,10 @@ def _(
     save_output,
     seed_field,
     set_refresh,
+    show_results,
     steps,
     upload_to_image,
+    variations,
 ):
     mo.stop(not edit_btn.value)
     mo.stop(not edit_upload.value, mo.md("⚠️ upload at least one image"))
@@ -391,24 +435,27 @@ def _(
     mo.stop(not edit_prompt.value.strip(), mo.md("⚠️ enter an instruction first"))
     _images = [upload_to_image(f) for f in edit_upload.value]
     with mo.status.spinner("Editing…"):
-        _img, _recipe = run_pipe(
+        _imgs, _recipe = run_pipe(
             prompt=edit_prompt.value,
             images=_images,
             steps=steps.value,
             true_cfg_scale=guidance.value,
             negative_prompt=negative.value,
             seed=parse_seed(seed_field.value),
+            num_images=variations.value,
+            use_kv_cache=kv_cache.value,
         )
     _recipe["inputs"] = [f.name for f in edit_upload.value]
-    _path, _recipe = save_output(_img, _recipe)
+    _saved = [save_output(_im, _recipe) for _im in _imgs]
     set_refresh(lambda n: n + 1)
-    mo.vstack([mo.image(str(_path)), mo.md(f"`{_path.name}` · seed `{_recipe['seed']}`")])
+    show_results(_saved, _recipe)
     return
 
 
 @app.cell
 def _(
     guidance,
+    kv_cache,
     marked_from_mask,
     mo,
     negative,
@@ -423,9 +470,11 @@ def _(
     save_output,
     seed_field,
     set_refresh,
+    show_results,
     steps,
     strokes_to_mask,
     upload_to_image,
+    variations,
 ):
     mo.stop(not region_btn.value)
     mo.stop(region_base is None, mo.md("⚠️ upload a base image first"))
@@ -439,19 +488,21 @@ def _(
     _annotated = marked_from_mask(region_base, _mask)
     _refs = [upload_to_image(f) for f in (region_refs_upload.value or [])]
     with mo.status.spinner("Editing region…"):
-        _img, _recipe = run_pipe(
+        _imgs, _recipe = run_pipe(
             prompt=region_prompt.value,
             images=[_annotated] + _refs,
             steps=steps.value,
             true_cfg_scale=guidance.value,
             negative_prompt=negative.value,
             seed=parse_seed(seed_field.value),
+            num_images=variations.value,
+            use_kv_cache=kv_cache.value,
         )
     _recipe["mode"] = "region"
     _recipe["n_refs"] = len(_refs)
-    _path, _recipe = save_output(_img, _recipe)
+    _saved = [save_output(_im, _recipe) for _im in _imgs]
     set_refresh(lambda n: n + 1)
-    mo.vstack([mo.image(str(_path)), mo.md(f"`{_path.name}` · seed `{_recipe['seed']}`")])
+    show_results(_saved, _recipe)
     return
 
 
@@ -460,6 +511,7 @@ def _(
     ANNOTATION_COLORS,
     compose_region_prompt,
     guidance,
+    kv_cache,
     marked_from_strokes,
     mo,
     mr_base,
@@ -473,8 +525,10 @@ def _(
     save_output,
     seed_field,
     set_refresh,
+    show_results,
     steps,
     strokes_by_color,
+    variations,
 ):
     mo.stop(not mr_btn.value)
     mo.stop(mr_base is None, mo.md("⚠️ upload a base image first"))
@@ -497,18 +551,20 @@ def _(
     )
     _prompt = compose_region_prompt(_instructions)
     with mo.status.spinner("Editing regions…"):
-        _img, _recipe = run_pipe(
+        _imgs, _recipe = run_pipe(
             prompt=_prompt,
             images=_annotated,
             steps=steps.value,
             true_cfg_scale=guidance.value,
             negative_prompt=negative.value,
             seed=parse_seed(seed_field.value),
+            num_images=variations.value,
+            use_kv_cache=kv_cache.value,
         )
     _recipe["mode"] = "multi-region"
-    _path, _recipe = save_output(_img, _recipe)
+    _saved = [save_output(_im, _recipe) for _im in _imgs]
     set_refresh(lambda n: n + 1)
-    mo.vstack([mo.image(str(_path)), mo.md(f"`{_path.name}` · seed `{_recipe['seed']}`")])
+    show_results(_saved, _recipe)
     return
 
 
