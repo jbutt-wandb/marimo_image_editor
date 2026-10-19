@@ -12,8 +12,8 @@ interface (`src/qwen2_1/model.py` is the only model-specific layer).
 | Path | What |
 |---|---|
 | `app.py` | The marimo app (4 tabs: Create · Edit · Region · Multi-region + gallery) |
-| `src/qwen2_1/` | Library: pipeline wrapper, mask/annotation helpers, PencilCanvas widget, recipe storage |
-| `scripts/` | sync / launch / stop |
+| `src/qwen2_1/` | Library: pipeline wrapper, mask/annotation helpers, PencilCanvas widget, recipe storage, PE client |
+| `scripts/` | sync / launch / stop / pe_server (runs on the node) |
 | `scratchpad.ipynb` | Original Jupyter experiments (reference, unused by the app) |
 
 This local repo is the **source of truth**. The cluster copy at
@@ -30,6 +30,18 @@ scripts/stop.sh                # stop marimo + tunnel, keep the GPU job
 scripts/stop.sh --release      # …and cancel the Slurm job
 scripts/sync.sh                # push code only (marimo --watch hot-reloads app.py)
 ```
+
+## Prompt enhancement
+
+The job allocates **2 GPUs**: GPU 0 runs the image pipeline, GPU 1 hosts the two
+official prompt-enhancement models (`…-PE-T2I`, `…-PE-I2I`, Qwen3.5-VL 9B) as
+vLLM servers (`scripts/pe_server.sh`, dedicated venv `/mnt/data/…/vllm-env`).
+Every prompt is implicitly rewritten into a detailed, generation-optimised one
+before hitting the image model (`src/qwen2_1/enhance.py`, mirroring the official
+`prompt_rewrite/` protocol — system prompts vendored in `src/qwen2_1/pe_prompts/`).
+Recipes record both `original_prompt` and the rewritten `prompt`. The "Auto"
+aspect ratio uses the enhancer's suggested `wh_ratio`. Toggle off under
+Advanced; if the servers are down the app silently falls back to raw prompts.
 
 Notes:
 - First generation loads the model (~38 GB bf16, a couple of minutes). Only one

@@ -24,6 +24,8 @@ JOBID=""
 if [[ -n "$JOBID" ]]; then
   ssh "$SSH_HOST" "srun --jobid=$JOBID --overlap pkill -f 'bin/marimo' || true" \
     && echo "marimo stopped."
+  ssh "$SSH_HOST" "srun --jobid=$JOBID --overlap pkill -f 'bin/vllm' || true" \
+    && echo "prompt enhancers stopped."
   if [[ $RELEASE == 1 ]]; then
     ssh "$SSH_HOST" "scancel $JOBID" && echo "Job $JOBID cancelled."
   else

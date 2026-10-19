@@ -8,6 +8,10 @@ reference, max 10). Only one process may hold the model (~38 GB bf16 on an
 
 import random
 
+import weave
+
+from qwen2_1.telemetry import thumbnail_logged_values
+
 # Recommended 2K resolutions. The pipeline falls back to a 1024 total-area
 # target when width/height are omitted, so Create mode always passes these
 # explicitly. Edit modes omit them to inherit the input image's size.
@@ -52,6 +56,10 @@ def pipe_is_loaded():
     return _pipe is not None
 
 
+@weave.op(
+    postprocess_inputs=thumbnail_logged_values,
+    postprocess_output=thumbnail_logged_values,
+)
 def run_pipe(
     prompt,
     images=None,

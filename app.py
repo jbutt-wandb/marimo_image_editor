@@ -23,19 +23,21 @@ def _():
         marked_from_mask,
         marked_from_strokes,
         pipe_is_loaded,
-        run_pipe,
-        save_output,
         strokes_by_color,
         strokes_to_mask,
     )
+    from qwen2_1 import studio
+    from qwen2_1.telemetry import WEAVE_PROJECT, init_telemetry
     return (
         ANNOTATION_COLORS,
         ASPECT_RATIOS,
         Image,
         MODEL_ID,
         RESOLUTIONS,
+        WEAVE_PROJECT,
         canvas_for_image,
         compose_region_prompt,
+        init_telemetry,
         io,
         json,
         list_outputs,
@@ -43,18 +45,31 @@ def _():
         marked_from_strokes,
         mo,
         pipe_is_loaded,
-        run_pipe,
-        save_output,
         strokes_by_color,
         strokes_to_mask,
+        studio,
     )
 
 
 @app.cell
-def _(MODEL_ID, get_refresh, mo, pipe_is_loaded):
+def _(init_telemetry):
+    import uuid
+
+    tracing_on = init_telemetry()
+    session_id = str(uuid.uuid4())
+    return session_id, tracing_on
+
+
+@app.cell
+def _(MODEL_ID, WEAVE_PROJECT, get_refresh, mo, pipe_is_loaded, tracing_on):
     get_refresh()
     model_select = mo.ui.dropdown(
         options=[MODEL_ID], value=MODEL_ID, label="Model"
+    )
+    _tracing_chip = (
+        f"📡 tracing → [{WEAVE_PROJECT}](https://wandb.ai/{WEAVE_PROJECT}/weave)"
+        if tracing_on
+        else "⚪ tracing off (no WANDB_API_KEY)"
     )
     mo.vstack(
         [
@@ -64,6 +79,7 @@ def _(MODEL_ID, get_refresh, mo, pipe_is_loaded):
 
     Generate and edit images with instruction-driven diffusion models · status:
     {"✅ model loaded" if pipe_is_loaded() else "💤 model loads on first generation (allow a couple of minutes)"}
+    · {_tracing_chip}
     """
             ),
             model_select,
@@ -124,6 +140,10 @@ def _(mo):
     kv_cache = mo.ui.checkbox(
         value=True, label="KV cache (faster edits; uses extra VRAM)"
     )
+    enhance_toggle = mo.ui.checkbox(
+        value=True,
+        label="Enhance prompts (rewrite via the PE model; falls back to your raw prompt if unavailable)",
+    )
     settings_panel = mo.vstack(
         [
             mo.hstack([steps, seed_field], justify="start", gap=2),
@@ -138,13 +158,23 @@ def _(mo):
                                 "ignores either one on its own._"
                             ),
                             mo.hstack([variations, kv_cache], justify="start", gap=2),
+                            enhance_toggle,
                         ]
                     )
                 }
             ),
         ]
     )
-    return guidance, kv_cache, negative, seed_field, settings_panel, steps, variations
+    return (
+        enhance_toggle,
+        guidance,
+        kv_cache,
+        negative,
+        seed_field,
+        settings_panel,
+        steps,
+        variations,
+    )
 
 
 @app.cell
@@ -153,7 +183,7 @@ def _(ASPECT_RATIOS, RESOLUTIONS, mo):
         placeholder="Describe the image you want…", label="Prompt", full_width=True, rows=4
     )
     create_aspect = mo.ui.dropdown(
-        options=list(ASPECT_RATIOS), value="1:1", label="Aspect ratio"
+        options=["Auto"] + list(ASPECT_RATIOS), value="Auto", label="Aspect ratio"
     )
     create_resolution = mo.ui.dropdown(
         options=list(RESOLUTIONS), value="2K", label="Resolution"
@@ -370,62 +400,68 @@ def _(
 
 
 @app.cell
-def _(
+async def _(
     create_aspect,
     create_btn,
     create_prompt,
     create_resolution,
     create_transparent,
+    enhance_toggle,
     guidance,
     kv_cache,
     mo,
     negative,
     parse_seed,
-    run_pipe,
-    save_output,
     seed_field,
+    session_id,
     set_refresh,
     show_results,
     steps,
+    studio,
     variations,
 ):
     mo.stop(not create_btn.value)
     mo.stop(not create_prompt.value.strip(), mo.md("⚠️ enter a prompt first"))
     with mo.status.spinner("Generating…"):
-        _imgs, _recipe = run_pipe(
+        _saved, _recipe = await studio.generate(
+            mode="create",
             prompt=create_prompt.value,
-            steps=steps.value,
-            true_cfg_scale=guidance.value,
-            negative_prompt=negative.value,
-            aspect=create_aspect.value,
-            resolution=create_resolution.value,
-            seed=parse_seed(seed_field.value),
-            transparent=create_transparent.value,
-            num_images=variations.value,
-            use_kv_cache=kv_cache.value,
+            params=dict(
+                steps=steps.value,
+                true_cfg_scale=guidance.value,
+                negative_prompt=negative.value,
+                aspect=create_aspect.value,
+                resolution=create_resolution.value,
+                seed=parse_seed(seed_field.value),
+                transparent=create_transparent.value,
+                num_images=variations.value,
+                use_kv_cache=kv_cache.value,
+            ),
+            enhance_enabled=enhance_toggle.value,
+            session_id=session_id,
         )
-    _saved = [save_output(_im, _recipe) for _im in _imgs]
     set_refresh(lambda n: n + 1)
     show_results(_saved, _recipe)
     return
 
 
 @app.cell
-def _(
+async def _(
     edit_btn,
     edit_prompt,
     edit_upload,
+    enhance_toggle,
     guidance,
     kv_cache,
     mo,
     negative,
     parse_seed,
-    run_pipe,
-    save_output,
     seed_field,
+    session_id,
     set_refresh,
     show_results,
     steps,
+    studio,
     upload_to_image,
     variations,
 ):
@@ -435,25 +471,30 @@ def _(
     mo.stop(not edit_prompt.value.strip(), mo.md("⚠️ enter an instruction first"))
     _images = [upload_to_image(f) for f in edit_upload.value]
     with mo.status.spinner("Editing…"):
-        _imgs, _recipe = run_pipe(
+        _saved, _recipe = await studio.generate(
+            mode="edit",
             prompt=edit_prompt.value,
             images=_images,
-            steps=steps.value,
-            true_cfg_scale=guidance.value,
-            negative_prompt=negative.value,
-            seed=parse_seed(seed_field.value),
-            num_images=variations.value,
-            use_kv_cache=kv_cache.value,
+            params=dict(
+                steps=steps.value,
+                true_cfg_scale=guidance.value,
+                negative_prompt=negative.value,
+                seed=parse_seed(seed_field.value),
+                num_images=variations.value,
+                use_kv_cache=kv_cache.value,
+            ),
+            enhance_enabled=enhance_toggle.value,
+            session_id=session_id,
+            recipe_extra={"inputs": [f.name for f in edit_upload.value]},
         )
-    _recipe["inputs"] = [f.name for f in edit_upload.value]
-    _saved = [save_output(_im, _recipe) for _im in _imgs]
     set_refresh(lambda n: n + 1)
     show_results(_saved, _recipe)
     return
 
 
 @app.cell
-def _(
+async def _(
+    enhance_toggle,
     guidance,
     kv_cache,
     marked_from_mask,
@@ -466,13 +507,13 @@ def _(
     region_fill,
     region_prompt,
     region_refs_upload,
-    run_pipe,
-    save_output,
     seed_field,
+    session_id,
     set_refresh,
     show_results,
     steps,
     strokes_to_mask,
+    studio,
     upload_to_image,
     variations,
 ):
@@ -488,28 +529,32 @@ def _(
     _annotated = marked_from_mask(region_base, _mask)
     _refs = [upload_to_image(f) for f in (region_refs_upload.value or [])]
     with mo.status.spinner("Editing region…"):
-        _imgs, _recipe = run_pipe(
+        _saved, _recipe = await studio.generate(
+            mode="region",
             prompt=region_prompt.value,
             images=[_annotated] + _refs,
-            steps=steps.value,
-            true_cfg_scale=guidance.value,
-            negative_prompt=negative.value,
-            seed=parse_seed(seed_field.value),
-            num_images=variations.value,
-            use_kv_cache=kv_cache.value,
+            params=dict(
+                steps=steps.value,
+                true_cfg_scale=guidance.value,
+                negative_prompt=negative.value,
+                seed=parse_seed(seed_field.value),
+                num_images=variations.value,
+                use_kv_cache=kv_cache.value,
+            ),
+            enhance_enabled=enhance_toggle.value,
+            session_id=session_id,
+            recipe_extra={"n_refs": len(_refs)},
         )
-    _recipe["mode"] = "region"
-    _recipe["n_refs"] = len(_refs)
-    _saved = [save_output(_im, _recipe) for _im in _imgs]
     set_refresh(lambda n: n + 1)
     show_results(_saved, _recipe)
     return
 
 
 @app.cell
-def _(
+async def _(
     ANNOTATION_COLORS,
     compose_region_prompt,
+    enhance_toggle,
     guidance,
     kv_cache,
     marked_from_strokes,
@@ -521,13 +566,13 @@ def _(
     mr_instructions,
     negative,
     parse_seed,
-    run_pipe,
-    save_output,
     seed_field,
+    session_id,
     set_refresh,
     show_results,
     steps,
     strokes_by_color,
+    studio,
     variations,
 ):
     mo.stop(not mr_btn.value)
@@ -551,18 +596,21 @@ def _(
     )
     _prompt = compose_region_prompt(_instructions)
     with mo.status.spinner("Editing regions…"):
-        _imgs, _recipe = run_pipe(
+        _saved, _recipe = await studio.generate(
+            mode="multi-region",
             prompt=_prompt,
-            images=_annotated,
-            steps=steps.value,
-            true_cfg_scale=guidance.value,
-            negative_prompt=negative.value,
-            seed=parse_seed(seed_field.value),
-            num_images=variations.value,
-            use_kv_cache=kv_cache.value,
+            images=[_annotated],
+            params=dict(
+                steps=steps.value,
+                true_cfg_scale=guidance.value,
+                negative_prompt=negative.value,
+                seed=parse_seed(seed_field.value),
+                num_images=variations.value,
+                use_kv_cache=kv_cache.value,
+            ),
+            enhance_enabled=enhance_toggle.value,
+            session_id=session_id,
         )
-    _recipe["mode"] = "multi-region"
-    _saved = [save_output(_im, _recipe) for _im in _imgs]
     set_refresh(lambda n: n + 1)
     show_results(_saved, _recipe)
     return

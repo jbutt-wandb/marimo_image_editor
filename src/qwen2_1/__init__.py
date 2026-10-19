@@ -1,4 +1,5 @@
 from qwen2_1.canvas import PencilCanvas, canvas_for_image
+from qwen2_1.enhance import nearest_aspect
 from qwen2_1.masks import (
     ANNOTATION_COLORS,
     color_name,

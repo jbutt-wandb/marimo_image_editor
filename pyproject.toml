@@ -12,10 +12,13 @@ dependencies = [
     "ipykernel>=7.3.0",
     "jupyter>=1.1.1",
     "marimo>=0.13",
+    "openai>=1.99",
+    "openai-agents>=0.24",
     "pillow>=12.3.0",
     "torch>=2.4.0",
     "torchvision>=0.29.0",
     "transformers>=5.17",
+    "weave>=0.53",
 ]
 
 [project.scripts]
