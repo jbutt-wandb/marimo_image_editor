@@ -1,0 +1,29 @@
+[project]
+name = "qwen2-1"
+version = "0.1.0"
+description = "Add your description here"
+readme = "README.md"
+requires-python = ">=3.10"
+dependencies = [
+    "accelerate>=1.15.0",
+    "anywidget>=0.11.0",
+    "diffusers",
+    "ipycanvas>=0.14.3",
+    "ipykernel>=7.3.0",
+    "jupyter>=1.1.1",
+    "marimo>=0.13",
+    "pillow>=12.3.0",
+    "torch>=2.4.0",
+    "torchvision>=0.29.0",
+    "transformers>=5.17",
+]
+
+[project.scripts]
+qwen2-1 = "qwen2_1:main"
+
+[build-system]
+requires = ["uv_build>=0.12.1,<0.13.0"]
+build-backend = "uv_build"
+
+[tool.uv.sources]
+diffusers = { git = "https://github.com/huggingface/diffusers" }

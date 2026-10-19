@@ -1,0 +1,21 @@
+# Python-generated files
+__pycache__/
+*.py[oc]
+build/
+dist/
+wheels/
+*.egg-info
+
+# Virtual environments
+.venv
+
+# Notebook / app state
+.ipynb_checkpoints/
+.marimo/
+__marimo__/
+
+# Generated outputs
+outputs/
+
+# Launch-script state
+.launch/
