@@ -9,7 +9,7 @@ import logging
 import os
 import sys
 
-WEAVE_PROJECT = "wandb-smle/jb_image_editing_tool"
+WEAVE_PROJECT = os.environ.get("WEAVE_PROJECT")  # e.g. "entity/project"; unset -> untraced
 TRACE_THUMB_SIDE = 1024  # max image side logged into traces (server caps requests)
 
 _initialized = False
@@ -38,6 +38,9 @@ def init_telemetry():
         return True
     if not os.environ.get("WANDB_API_KEY"):
         logging.getLogger(__name__).info("telemetry off (no WANDB_API_KEY)")
+        return False
+    if not WEAVE_PROJECT:
+        logging.getLogger(__name__).info("telemetry off (no WEAVE_PROJECT)")
         return False
     try:
         logging.getLogger("weave").setLevel(logging.ERROR)

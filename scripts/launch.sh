@@ -35,6 +35,15 @@ mkdir -p "$STATE_DIR"
 
 [[ $SYNC == 1 ]] && "$LOCAL_DIR/scripts/sync.sh"
 
+# Weave/Forge tracing project travels from local .env into the remote env.
+WEAVE_PROJECT=""
+if [[ -f "$LOCAL_DIR/.env" ]] && grep -q '^WEAVE_PROJECT=' "$LOCAL_DIR/.env"; then
+  WEAVE_PROJECT=$(grep '^WEAVE_PROJECT=' "$LOCAL_DIR/.env" | cut -d= -f2-)
+fi
+if [[ -z "${WEAVE_PROJECT}" ]]; then
+  echo "warning: WEAVE_PROJECT not set in .env - app will run untraced" >&2
+fi
+
 # --- find or create the Slurm job -------------------------------------------
 JOBID=$(ssh "$SSH_HOST" "squeue --me --name=$JOB_NAME -h -o %A -t RUNNING,PENDING | head -1")
 if [[ -n "$JOBID" ]]; then
@@ -112,7 +121,7 @@ sleep 3  # let the port free up
 AUTH=""
 [[ "$MODE" == edit ]] && AUTH="--no-token"   # tunnel is the auth boundary
 echo "Starting marimo ${MODE}..."
-ssh "$SSH_HOST" "nohup srun --jobid=$JOBID --overlap bash -c 'source $REMOTE_DIR/.venv/bin/activate && export CUDA_VISIBLE_DEVICES=0 HF_HOME=$DATA_DIR/hf PE_T2I_URL=http://$NODE_IP:$PE_T2I_PORT PE_I2I_URL=http://$NODE_IP:$PE_I2I_PORT && [ -f $DATA_DIR/.wandb_key ] && export WANDB_API_KEY=\$(cat $DATA_DIR/.wandb_key); export WANDB_DIR=$DATA_DIR/wandb WANDB_CACHE_DIR=$DATA_DIR/wandb/cache WANDB_CONFIG_DIR=$DATA_DIR/wandb/config WEAVE_USE_SERVER_CACHE=false; mkdir -p $DATA_DIR/wandb/cache $DATA_DIR/wandb/config; cd $REMOTE_DIR && exec marimo $MODE app.py --host $NODE_IP --port $PORT --headless --watch $AUTH' > $DATA_DIR/marimo.log 2>&1 &"
+ssh "$SSH_HOST" "nohup srun --jobid=$JOBID --overlap bash -c 'source $REMOTE_DIR/.venv/bin/activate && export CUDA_VISIBLE_DEVICES=0 HF_HOME=$DATA_DIR/hf PE_T2I_URL=http://$NODE_IP:$PE_T2I_PORT PE_I2I_URL=http://$NODE_IP:$PE_I2I_PORT WEAVE_PROJECT=${WEAVE_PROJECT} && [ -f $DATA_DIR/.wandb_key ] && export WANDB_API_KEY=\$(cat $DATA_DIR/.wandb_key); export WANDB_DIR=$DATA_DIR/wandb WANDB_CACHE_DIR=$DATA_DIR/wandb/cache WANDB_CONFIG_DIR=$DATA_DIR/wandb/config WEAVE_USE_SERVER_CACHE=false; mkdir -p $DATA_DIR/wandb/cache $DATA_DIR/wandb/config; cd $REMOTE_DIR && exec marimo $MODE app.py --host $NODE_IP --port $PORT --headless --watch $AUTH' > $DATA_DIR/marimo.log 2>&1 &"
 
 echo -n "Waiting for marimo"
 for _ in $(seq 1 48); do

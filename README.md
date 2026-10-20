@@ -39,15 +39,19 @@ This local repo is the **source of truth**; the cluster copy executes.
    ssh coreweave-login true   # must succeed (silently)
    ```
 
-3. **W&B key.** Create `.env` in the repo root (gitignored):
+3. **W&B key + Weave project.** Create `.env` in the repo root (gitignored):
 
    ```bash
    echo 'WANDB_API_KEY=<your Forge/W&B key>' > .env
+   echo 'WEAVE_PROJECT=wandb-smle/jb_image_editing_tool' >> .env
    ```
 
    `scripts/sync.sh` copies the key — outside the rsync tree — into a
-   chmod-600 file on the cluster (`/mnt/data/jbutt+cwb607/.wandb_key`).
-   Optional: without it the app runs identically but untraced.
+   chmod-600 file on the cluster (`/mnt/data/jbutt+cwb607/.wandb_key`);
+   `scripts/launch.sh` reads `WEAVE_PROJECT` from `.env` and exports it into
+   the remote marimo process, so changing it in `.env` and relaunching
+   switches tracing projects. Both are optional: without either the app runs
+   identically but untraced.
 
 4. **Cluster prerequisites.** These already exist for the current deployment
    under `/mnt/data/jbutt+cwb607/` — a new developer only needs to verify:

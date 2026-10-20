@@ -60,15 +60,10 @@ def _(init_telemetry):
 
 
 @app.cell
-def _(MODEL_ID, WEAVE_PROJECT, get_refresh, mo, pipe_is_loaded, tracing_on):
+def _(MODEL_ID, get_refresh, mo, pipe_is_loaded):
     get_refresh()
     model_select = mo.ui.dropdown(
         options=[MODEL_ID], value=MODEL_ID, label="Model"
-    )
-    _tracing_chip = (
-        f"📡 tracing → [{WEAVE_PROJECT}](https://wandb.ai/{WEAVE_PROJECT}/weave)"
-        if tracing_on
-        else "⚪ tracing off (no WANDB_API_KEY)"
     )
     mo.vstack(
         [
@@ -78,7 +73,7 @@ def _(MODEL_ID, WEAVE_PROJECT, get_refresh, mo, pipe_is_loaded, tracing_on):
 
     Generate and edit images with instruction-driven diffusion models · status:
     {"✅ model loaded" if pipe_is_loaded() else "💤 model loads on first generation (allow a couple of minutes)"}
-    · {_tracing_chip}
+    ·
     """
             ),
             model_select,
@@ -602,10 +597,15 @@ async def _(
 
 @app.cell
 def _(WEAVE_PROJECT, mo):
-    mo.md(
-        f"_Generated images are not stored on the cluster — every generation is "
-        f"traced and archived in [Weave](https://wandb.ai/{WEAVE_PROJECT}/weave)._"
-    )
+    if WEAVE_PROJECT:
+        _note = (
+            f"_Generated images are not stored on the cluster — every generation "
+            f"is traced and archived in "
+            f"[Weave](https://wandb.ai/{WEAVE_PROJECT}/weave)._"
+        )
+    else:
+        _note = "_Generated images are not stored on the cluster._"
+    mo.md(_note)
     return
 
 
