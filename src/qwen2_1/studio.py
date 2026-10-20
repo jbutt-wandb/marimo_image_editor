@@ -3,7 +3,8 @@
 Trace structure (one SDK trace per user click, consumed by Weave's
 WeaveTracingProcessor so both agents render in the Agents tab):
 
-    <mode> · seed <seed>          (SDK trace root)
+    create image | edit image | edit image region(s)   (SDK trace root;
+    │                              seed/mode/session in trace metadata)
     ├─ PromptEnhancer-T2I|I2I     (real Agents-SDK agent run)
     │    └─ generation (tokens, rewritten prompt)
     └─ ImageGenerator|ImageEditor|RegionEditor|MultiRegionEditor
@@ -56,6 +57,14 @@ IMAGE_AGENT_NAMES = {
     "edit": "ImageEditor",
     "region": "RegionEditor",
     "multi-region": "MultiRegionEditor",
+}
+
+# Human task names for the SDK trace root (seed lives in trace metadata).
+TRACE_NAMES = {
+    "create": "create image",
+    "edit": "edit image",
+    "region": "edit image region",
+    "multi-region": "edit image regions",
 }
 
 
@@ -180,8 +189,10 @@ async def generate(
         {"session_id": session_id, "mode": mode, "model": MODEL_ID,
          "pe_model": PE_TASKS[task]["model"], "enhance_enabled": enhance_enabled}
     ):
-        with trace(f"{mode} · seed {seed}", group_id=session_id,
-                   metadata={"mode": mode, "session_id": str(session_id)}):
+        with trace(TRACE_NAMES[mode], group_id=session_id,
+                   metadata={"mode": mode, "session_id": str(session_id),
+                             "seed": str(seed),
+                             "enhance_enabled": str(enhance_enabled)}):
             t0 = time.monotonic()
             enh = (
                 await enhance_prompt(prompt, images=images, task=task)

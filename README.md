@@ -13,21 +13,100 @@ orchestrated as agents (OpenAI Agents SDK), with every generation traced to
 | [`docs/architecture.md`](docs/architecture.md) | Components, request lifecycle, compute table, scripts, failure modes, gotchas |
 | [`docs/model.md`](docs/model.md) | Qwen-Image-2.1 capabilities, resolutions, prompting tips, PE models |
 
-## Prerequisites
+## Setup (first time)
 
-- **Mac with SSH access to the cluster** via a host alias `coreweave-login` in
-  `~/.ssh/config` (the scripts use `ssh coreweave-login …` for everything;
-  override with `SSH_HOST=<alias>`).
-- **Local `.env`** in the repo root containing `WANDB_API_KEY=…` (gitignored).
-  `sync.sh` copies the key — outside the rsync tree — into a `chmod 600` file
-  on the cluster (`/mnt/data/jbutt+cwb607/.wandb_key`); without it the app
-  simply runs untraced.
-- **[uv](https://docs.astral.sh/uv/)** installed locally (and available on the
-  cluster at `/mnt/data/jbutt+cwb607/bin/uv` — used for remote dependency syncs).
-- **Cluster storage** under `/mnt/data/jbutt+cwb607/`: the project copy
-  (`qwen2.1/` with its uv venv), a separate vLLM venv (`vllm-env/`), and the
-  HF model cache (`hf/`). This local repo is the **source of truth**; the
-  cluster copy executes.
+One-time, from a fresh Mac; day-to-day use is just [Running it](#running-it).
+This local repo is the **source of truth**; the cluster copy executes.
+
+1. **Clone the repo and install [uv](https://docs.astral.sh/uv/) locally:**
+
+   ```bash
+   git clone <repo-url> qwen2.1_image && cd qwen2.1_image
+   curl -LsSf https://astral.sh/uv/install.sh | sh
+   ```
+
+2. **SSH config.** The scripts reach the cluster exclusively through the host
+   alias `coreweave-login` (override with `SSH_HOST=<alias>`). Add to
+   `~/.ssh/config`:
+
+   ```
+   Host coreweave-login
+       HostName <cluster-login-node>
+       User <your-cluster-username>
+   ```
+
+   ```bash
+   ssh coreweave-login true   # must succeed (silently)
+   ```
+
+3. **W&B key.** Create `.env` in the repo root (gitignored):
+
+   ```bash
+   echo 'WANDB_API_KEY=<your Forge/W&B key>' > .env
+   ```
+
+   `scripts/sync.sh` copies the key — outside the rsync tree — into a
+   chmod-600 file on the cluster (`/mnt/data/jbutt+cwb607/.wandb_key`).
+   Optional: without it the app runs identically but untraced.
+
+4. **Cluster prerequisites.** These already exist for the current deployment
+   under `/mnt/data/jbutt+cwb607/` — a new developer only needs to verify:
+
+   ```bash
+   ssh coreweave-login ls /mnt/data/jbutt+cwb607
+   # expect: bin/ (uv) · qwen2.1/ (project + .venv) · vllm-env/ · hf/
+   ```
+
+   If any are missing, recreate them:
+
+   - **`bin/uv`** — the uv binary the scripts use for remote dependency syncs.
+   - **`qwen2.1/` + app venv** — project copy with a **uv-managed Python 3.10**
+     venv; created by the remote `uv sync` that `scripts/sync.sh` performs
+     (force it with `scripts/sync.sh --deps`).
+   - **`vllm-env/`** — separate venv for the PE servers (Python 3.12):
+
+     ```bash
+     ssh coreweave-login
+     cd /mnt/data/jbutt+cwb607
+     bin/uv venv --python 3.12 vllm-env
+     bin/uv pip install --python vllm-env/bin/python vllm ninja
+     ```
+
+   - **`hf/`** — model weights pre-downloaded into `HF_HOME`, e.g.:
+
+     ```bash
+     export HF_HOME=/mnt/data/jbutt+cwb607/hf
+     hf download Qwen/Qwen-Image-2.1           # image pipeline (GPU 0)
+     hf download Qwen/Qwen-Image-2.1-PE-T2I    # prompt enhancers (GPU 1)
+     hf download Qwen/Qwen-Image-2.1-PE-I2I
+     ```
+
+5. **First launch:**
+
+   ```bash
+   scripts/launch.sh
+   ```
+
+   Expect, in order: Slurm job allocation, PE servers **~5–10 min** cold (two
+   9B models load sequentially on GPU 1; `launch.sh` continues even if they
+   fail — the app then uses raw prompts), marimo start, then the tunnel and:
+
+   ```
+   ✅ ready: http://localhost:2718  (mode: run, job <id> on <node>)
+   ```
+
+   Open <http://localhost:2718>. The first generation loads the image pipeline
+   lazily — allow **~2–4 min** (~38 GB bf16 onto GPU 0); later generations
+   skip this.
+
+6. **Sanity checks:**
+
+   ```bash
+   ssh coreweave-login tail -f /mnt/data/jbutt+cwb607/marimo.log   # stage logs
+   ```
+
+   and, after one generation, confirm a trace landed in
+   [wandb-smle/jb_image_editing_tool](https://wandb.ai/wandb-smle/jb_image_editing_tool/weave).
 
 ## Running it
 
@@ -55,16 +134,10 @@ scripts/stop.sh                 # stop marimo + PE servers + tunnel, KEEP the GP
 scripts/stop.sh --release       # ... and cancel the Slurm job (frees both GPUs)
 ```
 
-Timing expectations on a cold start:
-
-- **PE servers**: ~5–10 min the first time (two 9B models load sequentially on
-  GPU 1). `launch.sh` waits for their `/health` endpoints and continues even if
-  they fail (the app then uses raw prompts).
-- **First generation**: the image pipeline loads lazily on the first click —
-  allow **~2–4 min** (~38 GB bf16 onto GPU 0). Later generations skip this.
-
-Logs live on the cluster: `ssh coreweave-login tail -f
-/mnt/data/jbutt+cwb607/marimo.log` (also `pe_t2i.log`, `pe_i2i.log`).
+A cold start (fresh Slurm job) repeats the setup-step-5 timings: ~5–10 min for
+the PE servers, ~2–4 min pipeline load on the first generation. Logs live on
+the cluster next to the project: `marimo.log`, `pe_t2i.log`, `pe_i2i.log` in
+`/mnt/data/jbutt+cwb607/`.
 
 ## Tracing
 
