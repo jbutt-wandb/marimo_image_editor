@@ -91,6 +91,14 @@ def _(mo):
 
 
 @app.cell
+def _():
+    # Last finished generation, so input tweaks don't blank the results area.
+    # Plain dict on purpose: mutating it must not retrigger the results cell.
+    last_result = {}
+    return (last_result,)
+
+
+@app.cell
 def _(io, mo):
     def parse_seed(text):
         """'' -> None (random); otherwise int or a user-facing stop."""
@@ -107,17 +115,24 @@ def _(io, mo):
 
         return _Image.open(io.BytesIO(upload_file.contents))
 
-    def show_results(images, recipe):
-        """Inline display of generated PIL images with download buttons.
-        Images live in Weave (traces + dataset), not on disk."""
-        items = []
-        for i, im in enumerate(images):
+    def encode_pngs(images):
+        """PNG-encode once per generation; re-displays reuse the bytes."""
+        encoded = []
+        for im in images:
             buf = io.BytesIO()
             im.save(buf, "PNG")
-            items.append(mo.image(im))
+            encoded.append(buf.getvalue())
+        return encoded
+
+    def show_results(pngs, recipe):
+        """Inline display of generated images with download buttons.
+        Images live in Weave (traces + dataset), not on disk."""
+        items = []
+        for i, data in enumerate(pngs):
+            items.append(mo.image(data))
             items.append(
                 mo.download(
-                    data=buf.getvalue(),
+                    data=data,
                     filename=f"{recipe['mode']}-seed{recipe['seed']}-{i}.png",
                     label="Download",
                 )
@@ -126,7 +141,7 @@ def _(io, mo):
         if recipe.get("enhanced"):
             caption += " · prompt enhanced"
         return mo.vstack(items + [mo.md(caption)])
-    return parse_seed, show_results, upload_to_image
+    return encode_pngs, parse_seed, show_results, upload_to_image
 
 
 @app.cell
@@ -408,104 +423,29 @@ def _(
 
 @app.cell
 async def _(
+    ANNOTATION_COLORS,
+    compose_region_prompt,
     create_aspect,
     create_btn,
     create_prompt,
     create_resolution,
     create_transparent,
-    enhance_toggle,
-    guidance,
-    kv_cache,
-    mo,
-    negative,
-    parse_seed,
-    seed_field,
-    session_id,
-    set_refresh,
-    show_results,
-    steps,
-    studio,
-    variations,
-):
-    mo.stop(not create_btn.value)
-    mo.stop(not create_prompt.value.strip(), mo.md("⚠️ enter a prompt first"))
-    with mo.status.spinner("Generating…"):
-        _imgs, _recipe = await studio.generate(
-            mode="create",
-            prompt=create_prompt.value,
-            params=dict(
-                steps=steps.value,
-                true_cfg_scale=guidance.value,
-                negative_prompt=negative.value,
-                aspect=create_aspect.value,
-                resolution=create_resolution.value,
-                seed=parse_seed(seed_field.value),
-                transparent=create_transparent.value,
-                num_images=variations.value,
-                use_kv_cache=kv_cache.value,
-            ),
-            enhance_enabled=enhance_toggle.value,
-            session_id=session_id,
-        )
-    set_refresh(lambda n: n + 1)
-    show_results(_imgs, _recipe)
-    return
-
-
-@app.cell
-async def _(
     edit_btn,
     edit_prompt,
     edit_upload,
+    encode_pngs,
     enhance_toggle,
     guidance,
     kv_cache,
-    mo,
-    negative,
-    parse_seed,
-    seed_field,
-    session_id,
-    set_refresh,
-    show_results,
-    steps,
-    studio,
-    upload_to_image,
-    variations,
-):
-    mo.stop(not edit_btn.value)
-    mo.stop(not edit_upload.value, mo.md("⚠️ upload at least one image"))
-    mo.stop(len(edit_upload.value) > 10, mo.md("⚠️ at most 10 images"))
-    mo.stop(not edit_prompt.value.strip(), mo.md("⚠️ enter an instruction first"))
-    _images = [upload_to_image(f) for f in edit_upload.value]
-    with mo.status.spinner("Editing…"):
-        _imgs, _recipe = await studio.generate(
-            mode="edit",
-            prompt=edit_prompt.value,
-            images=_images,
-            params=dict(
-                steps=steps.value,
-                true_cfg_scale=guidance.value,
-                negative_prompt=negative.value,
-                seed=parse_seed(seed_field.value),
-                num_images=variations.value,
-                use_kv_cache=kv_cache.value,
-            ),
-            enhance_enabled=enhance_toggle.value,
-            session_id=session_id,
-            recipe_extra={"inputs": [f.name for f in edit_upload.value]},
-        )
-    set_refresh(lambda n: n + 1)
-    show_results(_imgs, _recipe)
-    return
-
-
-@app.cell
-async def _(
-    enhance_toggle,
-    guidance,
-    kv_cache,
+    last_result,
     marked_from_mask,
+    marked_from_strokes,
     mo,
+    mr_base,
+    mr_btn,
+    mr_canvas_raw,
+    mr_fill,
+    mr_instructions,
     negative,
     parse_seed,
     region_base,
@@ -524,102 +464,110 @@ async def _(
     upload_to_image,
     variations,
 ):
-    mo.stop(not region_btn.value)
-    mo.stop(region_base is None, mo.md("⚠️ upload a base image first"))
-    mo.stop(not region_canvas_raw.strokes, mo.md("⚠️ draw on the image to mark a region"))
-    _mask = strokes_to_mask(
-        region_canvas_raw.strokes,
-        region_base.size,
-        region_canvas_raw.width,
-        fill_enclosed=region_fill.value,
+    # Single results area shared by all four tasks: a new run always replaces
+    # whatever was shown before, instead of each task keeping its own output.
+    _mode = next(
+        (
+            m
+            for m, b in (
+                ("create", create_btn),
+                ("edit", edit_btn),
+                ("region", region_btn),
+                ("multi-region", mr_btn),
+            )
+            if b.value
+        ),
+        None,
     )
-    _annotated = marked_from_mask(region_base, _mask)
-    _refs = [upload_to_image(f) for f in (region_refs_upload.value or [])]
-    with mo.status.spinner("Editing region…"):
-        _imgs, _recipe = await studio.generate(
-            mode="region",
-            prompt=region_prompt.value,
-            images=[_annotated] + _refs,
-            params=dict(
-                steps=steps.value,
-                true_cfg_scale=guidance.value,
-                negative_prompt=negative.value,
-                seed=parse_seed(seed_field.value),
-                num_images=variations.value,
-                use_kv_cache=kv_cache.value,
-            ),
-            enhance_enabled=enhance_toggle.value,
-            session_id=session_id,
-            recipe_extra={"n_refs": len(_refs)},
+    # No run requested (an input merely changed): keep showing the last result.
+    mo.stop(_mode is None, show_results(**last_result) if last_result else None)
+
+    # A run just started: hide the previous result right away.
+    mo.output.replace(mo.md(""))
+
+    _params = dict(
+        steps=steps.value,
+        true_cfg_scale=guidance.value,
+        negative_prompt=negative.value,
+        seed=parse_seed(seed_field.value),
+        num_images=variations.value,
+        use_kv_cache=kv_cache.value,
+    )
+    _kwargs = {}
+
+    if _mode == "create":
+        mo.stop(not create_prompt.value.strip(), mo.md("⚠️ enter a prompt first"))
+        _prompt = create_prompt.value
+        _params.update(
+            aspect=create_aspect.value,
+            resolution=create_resolution.value,
+            transparent=create_transparent.value,
         )
-    set_refresh(lambda n: n + 1)
-    show_results(_imgs, _recipe)
-    return
+        _spin = "Generating…"
+    elif _mode == "edit":
+        mo.stop(not edit_upload.value, mo.md("⚠️ upload at least one image"))
+        mo.stop(len(edit_upload.value) > 10, mo.md("⚠️ at most 10 images"))
+        mo.stop(not edit_prompt.value.strip(), mo.md("⚠️ enter an instruction first"))
+        _prompt = edit_prompt.value
+        _kwargs["images"] = [upload_to_image(f) for f in edit_upload.value]
+        _kwargs["recipe_extra"] = {"inputs": [f.name for f in edit_upload.value]}
+        _spin = "Editing…"
+    elif _mode == "region":
+        mo.stop(region_base is None, mo.md("⚠️ upload a base image first"))
+        mo.stop(
+            not region_canvas_raw.strokes,
+            mo.md("⚠️ draw on the image to mark a region"),
+        )
+        _mask = strokes_to_mask(
+            region_canvas_raw.strokes,
+            region_base.size,
+            region_canvas_raw.width,
+            fill_enclosed=region_fill.value,
+        )
+        _refs = [upload_to_image(f) for f in (region_refs_upload.value or [])]
+        _prompt = region_prompt.value
+        _kwargs["images"] = [marked_from_mask(region_base, _mask)] + _refs
+        _kwargs["recipe_extra"] = {"n_refs": len(_refs)}
+        _spin = "Editing region…"
+    else:  # multi-region
+        mo.stop(mr_base is None, mo.md("⚠️ upload a base image first"))
+        mo.stop(
+            not mr_canvas_raw.strokes,
+            mo.md("⚠️ draw on the image to mark regions"),
+        )
+        _annotated, _used_hex = marked_from_strokes(
+            mr_base,
+            mr_canvas_raw.strokes,
+            mr_canvas_raw.width,
+            fill_enclosed=mr_fill.value,
+        )
+        _hex_to_name = {v: k for k, v in ANNOTATION_COLORS.items()}
+        _instructions = {
+            h: mr_instructions[_hex_to_name[h]].value
+            for h in _used_hex
+            if _hex_to_name.get(h) and mr_instructions[_hex_to_name[h]].value.strip()
+        }
+        mo.stop(
+            not _instructions,
+            mo.md("⚠️ write an instruction for at least one color you drew with"),
+        )
+        _prompt = compose_region_prompt(_instructions)
+        _kwargs["images"] = [_annotated]
+        _spin = "Editing regions…"
 
-
-@app.cell
-async def _(
-    ANNOTATION_COLORS,
-    compose_region_prompt,
-    enhance_toggle,
-    guidance,
-    kv_cache,
-    marked_from_strokes,
-    mo,
-    mr_base,
-    mr_btn,
-    mr_canvas_raw,
-    mr_fill,
-    mr_instructions,
-    negative,
-    parse_seed,
-    seed_field,
-    session_id,
-    set_refresh,
-    show_results,
-    steps,
-    strokes_by_color,
-    studio,
-    variations,
-):
-    mo.stop(not mr_btn.value)
-    mo.stop(mr_base is None, mo.md("⚠️ upload a base image first"))
-    mo.stop(not mr_canvas_raw.strokes, mo.md("⚠️ draw on the image to mark regions"))
-    _annotated, _used_hex = marked_from_strokes(
-        mr_base,
-        mr_canvas_raw.strokes,
-        mr_canvas_raw.width,
-        fill_enclosed=mr_fill.value,
-    )
-    _hex_to_name = {v: k for k, v in ANNOTATION_COLORS.items()}
-    _instructions = {
-        h: mr_instructions[_hex_to_name[h]].value
-        for h in _used_hex
-        if _hex_to_name.get(h) and mr_instructions[_hex_to_name[h]].value.strip()
-    }
-    mo.stop(
-        not _instructions,
-        mo.md("⚠️ write an instruction for at least one color you drew with"),
-    )
-    _prompt = compose_region_prompt(_instructions)
-    with mo.status.spinner("Editing regions…"):
+    with mo.status.spinner(_spin):
         _imgs, _recipe = await studio.generate(
-            mode="multi-region",
+            mode=_mode,
             prompt=_prompt,
-            images=[_annotated],
-            params=dict(
-                steps=steps.value,
-                true_cfg_scale=guidance.value,
-                negative_prompt=negative.value,
-                seed=parse_seed(seed_field.value),
-                num_images=variations.value,
-                use_kv_cache=kv_cache.value,
-            ),
+            params=_params,
             enhance_enabled=enhance_toggle.value,
             session_id=session_id,
+            **_kwargs,
         )
     set_refresh(lambda n: n + 1)
-    show_results(_imgs, _recipe)
+    last_result.clear()
+    last_result.update(pngs=encode_pngs(_imgs), recipe=_recipe)
+    mo.output.replace(show_results(**last_result))
     return
 
 
