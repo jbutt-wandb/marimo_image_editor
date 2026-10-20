@@ -173,7 +173,7 @@ async def generate(
     Returns (list of PIL images, recipe dict).
     """
     from agents import trace
-    from agents.tracing import agent_span, task_span, turn_span
+    from agents.tracing import agent_span, function_span, task_span, turn_span
 
     params = dict(params or {})
     task = "t2i" if mode == "create" else "edit"
@@ -242,7 +242,18 @@ async def generate(
             with task_span(name="Agent workflow"):
                 with agent_span(name=IMAGE_AGENT_NAMES[mode]):
                     with turn_span(turn=1, agent_name=IMAGE_AGENT_NAMES[mode]):
-                        imgs, recipe = run_pipe(**pipe_kwargs)
+                        # function_span -> execute_tool in Agent Lens; never put
+                        # PIL images in span data (strings only).
+                        with function_span(
+                            name="run_pipe",
+                            input=str(
+                                {k: v for k, v in pipe_kwargs.items() if k != "images"}
+                            ),
+                        ) as fs:
+                            imgs, recipe = run_pipe(**pipe_kwargs)
+                            fs.span_data.output = (
+                                f"{len(imgs)} image(s) {imgs[0].size}" if imgs else "0 images"
+                            )
             logger.info(
                 "pipeline done | %.1fs outputs=%d size=%s",
                 time.monotonic() - t1, len(imgs), imgs[0].size if imgs else None,

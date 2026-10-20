@@ -51,15 +51,21 @@ def init_telemetry():
         import weave
 
         weave.init(WEAVE_PROJECT)
-        # Explicitly route Agents-SDK spans to Weave (the autopatch didn't take
-        # in our setup) — this also replaces the SDK's default OpenAI exporter,
-        # which would otherwise warn about the missing OPENAI_API_KEY.
+        # Install BOTH Weave processors for Agents-SDK spans. The autopatch only
+        # installs WeaveOtelTracingProcessor (feeds the Agents tab / Agent Lens);
+        # WeaveTracingProcessor feeds the Traces tab (calls store). Registering
+        # both explicitly keeps the two tabs fed, and replacing the processor
+        # list also removes the SDK's default OpenAI exporter, which would
+        # otherwise warn about the missing OPENAI_API_KEY.
         from agents import set_trace_processors
         from weave.integrations.openai_agents.openai_agents import (
             WeaveTracingProcessor,
         )
+        from weave.integrations.openai_agents.otel_processor import (
+            WeaveOtelTracingProcessor,
+        )
 
-        set_trace_processors([WeaveTracingProcessor()])
+        set_trace_processors([WeaveTracingProcessor(), WeaveOtelTracingProcessor()])
         _initialized = True
         logging.getLogger(__name__).info("telemetry on -> %s", WEAVE_PROJECT)
         return True
