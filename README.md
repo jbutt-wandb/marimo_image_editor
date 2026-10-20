@@ -1,19 +1,21 @@
-# Image Studio
+# Marimo Image Studio
 
 A [marimo](https://marimo.io) web app for working with instruction-driven image
 models — text-to-image, instruction editing, multi-reference composition, and
 draw-on-image region editing — running on a CoreWeave Slurm cluster (2× H100)
 and used from your Mac through an SSH tunnel. The hosted model is
 **Qwen-Image-2.1**, fronted by the official Qwen prompt-enhancement models and
-orchestrated as agents (OpenAI Agents SDK), with every generation traced to
-[Weave](https://wandb.ai/wandb-smle/jb_image_editing_tool/weave).
+orchestrated as agents (OpenAI Agents SDK), with every generation traced to Forge Weave. You can view the traces 
+[here](https://wandb.ai/wandb-smle/jb_image_editing_tool/weave).
+
+For a deeper understanding of how the app works and the underlying model and architecture, please read below.
 
 | Doc | What |
 |---|---|
 | [`docs/architecture.md`](docs/architecture.md) | Components, request lifecycle, compute table, scripts, failure modes, gotchas |
 | [`docs/model.md`](docs/model.md) | Qwen-Image-2.1 capabilities, resolutions, prompting tips, PE models |
 
-## How it works
+## How the App Works
 
 A quick tour of the running app at <http://localhost:2718>, captured live.
 
@@ -168,7 +170,7 @@ This local repo is the **source of truth**; the cluster copy executes.
    and, after one generation, confirm a trace landed in
    [wandb-smle/jb_image_editing_tool](https://wandb.ai/wandb-smle/jb_image_editing_tool/weave).
 
-## Running it
+## Once Setup - Run the Following
 
 ```bash
 # One command, from the repo root on your Mac:

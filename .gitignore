@@ -22,3 +22,5 @@ outputs/
 
 # Launch-script state
 .launch/
+
+scratchpad.ipynb
