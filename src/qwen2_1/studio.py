@@ -30,6 +30,7 @@ from pydantic import BaseModel
 from qwen2_1.enhance import _extract_json, _image_to_data_url, nearest_aspect
 from qwen2_1.model import ASPECT_RATIOS, MODEL_ID, run_pipe
 from qwen2_1 import distill
+from qwen2_1.telemetry import thumbnail_logged_values
 
 logger = logging.getLogger(__name__)
 
@@ -112,8 +113,17 @@ def build_enhancer(task):
     return agent
 
 
+@weave.op(
+    postprocess_inputs=thumbnail_logged_values,
+    postprocess_output=thumbnail_logged_values,
+)
 async def enhance_prompt(prompt, images=None, task="t2i"):
-    """Run the PE agent; fail-open to the raw prompt on any error."""
+    """Run the PE agent; fail-open to the raw prompt on any error.
+
+    weave.op so the trace shows the raw user prompt (inputs) next to the
+    rewritten prompt (output) — the Agents-SDK spans log name-only data.
+    Runs as a plain function when weave.init was never called.
+    """
     fallback = {"prompt": prompt, "wh_ratio": None, "ratio_follow": None, "enhanced": False}
     agent = build_enhancer(task)
     if agent is None:
