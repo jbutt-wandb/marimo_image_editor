@@ -11,6 +11,7 @@ wheels/
 
 # Secrets
 .env
+scratchpad.ipynb
 
 # Notebook / app state
 .ipynb_checkpoints/
@@ -23,4 +24,3 @@ outputs/
 # Launch-script state
 .launch/
 
-scratchpad.ipynb
