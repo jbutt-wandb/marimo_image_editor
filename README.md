@@ -13,6 +13,62 @@ orchestrated as agents (OpenAI Agents SDK), with every generation traced to
 | [`docs/architecture.md`](docs/architecture.md) | Components, request lifecycle, compute table, scripts, failure modes, gotchas |
 | [`docs/model.md`](docs/model.md) | Qwen-Image-2.1 capabilities, resolutions, prompting tips, PE models |
 
+## How it works
+
+A quick tour of the running app at <http://localhost:2718>, captured live.
+
+### 1. Describe what you want
+
+![Create tab with a prompt filled in, steps and seed controls above the tabs](docs/images/create-prompt.jpg)
+
+Type a prompt on the **✨ Create** tab; Steps and Seed sit above the tabs and
+apply to every mode. You never submit this text verbatim — a PromptEnhancer
+agent (a vLLM-served Qwen PE model) rewrites it before generation, and with
+Aspect ratio on **Auto** the enhancer also picks the ratio that suits the scene.
+
+### 2. Generate
+
+![Results area cleared and showing a Generating spinner right after clicking Generate](docs/images/generating.jpg)
+
+All four tabs share one results area below the tabs: pressing any run button
+clears the previous image instantly and shows the spinner, so what you see is
+always the latest run.
+
+### 3. The result
+
+![Generated night cabin image with Download button and seed caption](docs/images/create-result.jpg)
+
+The finished image arrives with a **Download** button (served straight from
+memory — nothing is written to cluster disk) and a caption recording the seed
+and that the prompt was enhanced. Auto aspect chose 3:2 (1248×832) for this
+prompt. The whole run also lands in
+[Weave](https://wandb.ai/wandb-smle/jb_image_editing_tool/weave) as a trace
+plus a row in the `image-generation-log` dataset.
+
+### 4. Edit: upload and instruct
+
+![Edit tab with an uploaded image preview, filename, and an instruction filled in](docs/images/edit-preview.jpg)
+
+The **🖊 Edit** tab takes 1–10 images (the first is the edit target, the rest
+are references) and shows a thumbnail preview per upload. The edit itself is a
+plain-language instruction — here, re-lighting the generated cabin.
+
+### 5. The edited result
+
+![Edited cabin image now at dawn with pink light and no snowfall](docs/images/edit-result.jpg)
+
+Same cabin, now at dawn with the snowfall gone. Edits inherit the input
+image's size and get the same seed caption, download button, and Weave trace.
+
+### Advanced controls
+
+![Advanced accordion expanded showing guidance, negative prompt, variations, KV cache, and prompt-enhance toggles](docs/images/advanced-options.jpg)
+
+The **Advanced** accordion exposes true-CFG guidance with a negative prompt,
+multiple variations per run, a KV-cache toggle for faster edits, and the
+switch for prompt enhancement itself (off = your raw prompt goes straight to
+the pipeline).
+
 ## Setup (first time)
 
 One-time, from a fresh Mac; day-to-day use is just [Running it](#running-it).
