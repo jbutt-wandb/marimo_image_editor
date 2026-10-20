@@ -49,11 +49,14 @@ def _():
 
 @app.cell
 def _(init_telemetry):
+    import logging
     import uuid
 
     tracing_on = init_telemetry()
     session_id = str(uuid.uuid4())
-    return session_id, tracing_on
+    log = logging.getLogger("qwen2_1.app")
+    log.info("session start | id=%s tracing=%s", session_id, tracing_on)
+    return log, session_id, tracing_on
 
 
 @app.cell
@@ -234,6 +237,28 @@ def _(mo):
 
 
 @app.cell
+def _(edit_upload, log, mo):
+    if edit_upload.value:
+        log.info(
+            "edit upload | %d file(s): %s",
+            len(edit_upload.value),
+            ", ".join(f.name for f in edit_upload.value),
+        )
+        edit_preview = mo.hstack(
+            [
+                mo.image(f.contents, width=180, rounded=True, caption=f.name)
+                for f in edit_upload.value
+            ],
+            justify="start",
+            gap=1,
+            wrap=True,
+        )
+    else:
+        edit_preview = mo.md("")
+    return (edit_preview,)
+
+
+@app.cell
 def _(mo):
     region_upload = mo.ui.file(
         kind="area",
@@ -351,6 +376,7 @@ def _(
     create_resolution,
     create_transparent,
     edit_btn,
+    edit_preview,
     edit_prompt,
     edit_upload,
     mo,
@@ -383,7 +409,7 @@ def _(
             create_btn,
         ]
     )
-    _edit_tab = mo.vstack([edit_upload, edit_prompt, edit_btn])
+    _edit_tab = mo.vstack([edit_upload, edit_preview, edit_prompt, edit_btn])
     _region_tab = mo.vstack(
         [
             region_upload,
@@ -438,6 +464,7 @@ async def _(
     guidance,
     kv_cache,
     last_result,
+    log,
     marked_from_mask,
     marked_from_strokes,
     mo,
@@ -484,6 +511,7 @@ async def _(
 
     # A run just started: hide the previous result right away.
     mo.output.replace(mo.md(""))
+    log.info("run requested | mode=%s", _mode)
 
     _params = dict(
         steps=steps.value,
@@ -567,6 +595,7 @@ async def _(
     set_refresh(lambda n: n + 1)
     last_result.clear()
     last_result.update(pngs=encode_pngs(_imgs), recipe=_recipe)
+    log.info("results displayed | mode=%s images=%d", _mode, len(_imgs))
     mo.output.replace(show_results(**last_result))
     return
 

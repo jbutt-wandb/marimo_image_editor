@@ -5,10 +5,12 @@ WeaveTracingProcessor so both agents render in the Agents tab):
 
     create image | edit image | edit image region(s)   (SDK trace root;
     │                              seed/mode/session in trace metadata)
-    ├─ PromptEnhancer-T2I|I2I     (real Agents-SDK agent run)
-    │    └─ generation (tokens, rewritten prompt)
-    └─ ImageGenerator|ImageEditor|RegionEditor|MultiRegionEditor
-         └─ run_pipe              (weave.op: params + thumbnailed images)
+    ├─ Agent workflow (task span, added by Runner.run)
+    │    └─ PromptEnhancer-T2I|I2I     (real Agents-SDK agent run)
+    │         └─ turn 1 └─ generation (tokens, rewritten prompt)
+    └─ Agent workflow (task span, synthetic — mirrors Runner.run)
+         └─ ImageGenerator|ImageEditor|RegionEditor|MultiRegionEditor
+              └─ turn 1 └─ run_pipe   (weave.op: params + thumbnailed images)
 
 The PromptEnhancer agents wrap the vLLM-served PE models; they emit one JSON
 object as text (no tool calling), so final_output is parsed manually. The
@@ -171,7 +173,7 @@ async def generate(
     Returns (list of PIL images, recipe dict).
     """
     from agents import trace
-    from agents.tracing import agent_span
+    from agents.tracing import agent_span, task_span, turn_span
 
     params = dict(params or {})
     task = "t2i" if mode == "create" else "edit"
@@ -233,9 +235,14 @@ async def generate(
 
             logger.info("pipeline start | mode=%s steps=%s", mode, pipe_kwargs["steps"])
             t1 = time.monotonic()
-            # synthetic agent: makes the GPU step a first-class agent in traces
-            with agent_span(name=IMAGE_AGENT_NAMES[mode]):
-                imgs, recipe = run_pipe(**pipe_kwargs)
+            # Synthetic agent for the GPU step. The task>agent>turn nesting
+            # mirrors what Runner.run emits — Weave's Agents view only ingests
+            # spans inside such an "Agent workflow" task subtree, so a bare
+            # agent_span shows in traces but never in the Agents tab.
+            with task_span(name="Agent workflow"):
+                with agent_span(name=IMAGE_AGENT_NAMES[mode]):
+                    with turn_span(turn=1, agent_name=IMAGE_AGENT_NAMES[mode]):
+                        imgs, recipe = run_pipe(**pipe_kwargs)
             logger.info(
                 "pipeline done | %.1fs outputs=%d size=%s",
                 time.monotonic() - t1, len(imgs), imgs[0].size if imgs else None,
