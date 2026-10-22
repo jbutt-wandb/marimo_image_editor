@@ -20,7 +20,7 @@ observability goes to Weave (W&B / CoreWeave Forge).
         │      │  Slurm control    │
         │      └─────────┬─────────┘
         ▼                ▼
-┌─ compute node — Slurm job "jbutt-interactive" (2× H100 80GB, 24 h) ─────────┐
+┌─ compute node — Slurm job "$JOB_NAME" (2× H100 80GB, 24 h) ─────────────────┐
 │                                                                             │
 │  GPU 0                                   GPU 1                              │
 │  ┌─────────────────────────────┐         ┌─────────────────────────────┐    │
@@ -30,16 +30,16 @@ observability goes to Weave (W&B / CoreWeave Forge).
 │  │ ├ QwenImage21Pipeline bf16  │         │  bf16, reasoning-parser     │    │
 │  │ │  (~38 GB resident,        │         │  qwen3, venv: vllm-env)     │    │
 │  │ │   ~66 GB peak @ 2K)       │         └─────────────────────────────┘    │
-│  │ └ weave tracing + dataset ──┼──▶ wandb-smle/jb_image_editing_tool        │
+│  │ └ weave tracing + dataset ──┼──▶ $WEAVE_PROJECT (from .env)              │
 │  └─────────────────────────────┘                                            │
 │                                                                             │
-│  /mnt/data/jbutt+cwb607/: qwen2.1/ (code + .venv, py3.10) · vllm-env/       │
+│  $DATA_DIR/: qwen2.1/ (code + .venv, py3.10) · vllm-env/                    │
 │  (py3.12) · hf/ (model cache) · .wandb_key · *.log                          │
 └─────────────────────────────────────────────────────────────────────────────┘
 ```
 
 The local repo is the source of truth; `scripts/sync.sh` pushes it to
-`/mnt/data/jbutt+cwb607/qwen2.1/`, which is what actually executes.
+`$DATA_DIR/qwen2.1/`, which is what actually executes.
 
 ## Request lifecycle — what happens when a user clicks Generate
 
@@ -112,15 +112,15 @@ trace root.
 
 | Resource | Details |
 |---|---|
-| Slurm job | `jbutt-interactive`, `sbatch --gres=gpu:h100:2 --mem=0 --cpus-per-task=16 --time=24:00:00`, wraps `sleep infinity`; services attach with `srun --overlap` |
+| Slurm job | `$JOB_NAME` (default `<user>-interactive`), `sbatch --gres=gpu:h100:2 --mem=0 --cpus-per-task=16 --time=24:00:00`, wraps `sleep infinity`; services attach with `srun --overlap` |
 | GPU 0 | `Qwen/Qwen-Image-2.1` via diffusers (`QwenImage21Pipeline`, bf16): ~38 GB resident, **~66 GB peak during 2K inference** — exactly one process may hold it |
 | GPU 1 | 2× vLLM, bf16, `--max-num-seqs 16`, `--max-model-len 24576`, `--reasoning-parser qwen3`, `--limit-mm-per-prompt {"image": 10}` |
 | PE-T2I | `Qwen/Qwen-Image-2.1-PE-T2I` (Qwen3.5-VL 9B) — port **8001**, `--gpu-memory-utilization 0.45` |
 | PE-I2I | `Qwen/Qwen-Image-2.1-PE-I2I` (Qwen3.5-VL 9B) — port **8002**, `--gpu-memory-utilization 0.53` |
 | marimo | port **2718** on the node IP; reached via `ssh -N -L 2718:<node_ip>:2718` |
-| App venv | `/mnt/data/jbutt+cwb607/qwen2.1/.venv` — **uv-managed Python 3.10** (system python lacks dev headers → Triton JIT breaks) |
-| vLLM venv | `/mnt/data/jbutt+cwb607/vllm-env` — Python 3.12, separate from the app venv |
-| Storage | `/mnt/data/jbutt+cwb607/`: `qwen2.1/` (code), `hf/` (`HF_HOME` cache), `.wandb_key` (chmod 600), `wandb/` (W&B dirs), `*.log` |
+| App venv | `$DATA_DIR/qwen2.1/.venv` — **uv-managed Python 3.10** (system python lacks dev headers → Triton JIT breaks) |
+| vLLM venv | `$DATA_DIR/vllm-env` — Python 3.12, separate from the app venv |
+| Storage | `$DATA_DIR/`: `qwen2.1/` (code), `hf/` (`HF_HOME` cache), `.wandb_key` (chmod 600), `wandb/` (W&B dirs), `*.log` |
 
 Environment exported into the marimo process by `launch.sh`:
 `CUDA_VISIBLE_DEVICES=0`, `HF_HOME`, `PE_T2I_URL` / `PE_I2I_URL`

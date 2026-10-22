@@ -3,10 +3,9 @@
 # Slurm job (freeing the GPU).
 set -euo pipefail
 
-SSH_HOST="${SSH_HOST:-coreweave-login}"
-DATA_DIR=/mnt/data/jbutt+cwb607
-REMOTE_DIR="$DATA_DIR/qwen2.1"
 LOCAL_DIR="$(cd "$(dirname "$0")/.." && pwd)"
+# SSH_HOST / CLUSTER_USER / DATA_DIR / JOB_NAME / REMOTE_DIR — per-user, see config.sh
+source "$LOCAL_DIR/scripts/config.sh"
 STATE_DIR="$LOCAL_DIR/.launch"
 
 RELEASE=0
@@ -19,7 +18,7 @@ fi
 
 JOBID=""
 [[ -f "$STATE_DIR/state" ]] && JOBID=$(sed -n 's/^JOBID=//p' "$STATE_DIR/state")
-[[ -z "$JOBID" ]] && JOBID=$(ssh "$SSH_HOST" "squeue --me --name=jbutt-interactive -h -o %A -t RUNNING | head -1")
+[[ -z "$JOBID" ]] && JOBID=$(ssh "$SSH_HOST" "squeue --me --name=$JOB_NAME -h -o %A -t RUNNING | head -1")
 
 if [[ -n "$JOBID" ]]; then
   ssh "$SSH_HOST" "srun --jobid=$JOBID --overlap pkill -f 'bin/marimo' || true" \

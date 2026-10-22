@@ -7,11 +7,10 @@
 #   scripts/launch.sh --no-sync      # skip the rsync push
 set -euo pipefail
 
-SSH_HOST="${SSH_HOST:-coreweave-login}"
-DATA_DIR=/mnt/data/jbutt+cwb607
-REMOTE_DIR="$DATA_DIR/qwen2.1"
+LOCAL_DIR="$(cd "$(dirname "$0")/.." && pwd)"
+# SSH_HOST / CLUSTER_USER / DATA_DIR / JOB_NAME / REMOTE_DIR — per-user, see config.sh
+source "$LOCAL_DIR/scripts/config.sh"
 VLLM_ENV="$DATA_DIR/vllm-env"
-JOB_NAME=jbutt-interactive
 GPUS=2                # GPU 0: image pipeline · GPU 1: prompt enhancers
 PORT=2718
 PE_T2I_PORT=8001
@@ -29,7 +28,6 @@ while [[ $# -gt 0 ]]; do
 done
 [[ "$MODE" == run || "$MODE" == edit ]] || { echo "--mode must be run or edit" >&2; exit 1; }
 
-LOCAL_DIR="$(cd "$(dirname "$0")/.." && pwd)"
 STATE_DIR="$LOCAL_DIR/.launch"
 mkdir -p "$STATE_DIR"
 
@@ -78,7 +76,7 @@ echo "Node: $NODE ($NODE_IP)"
 # NB: pkill -f patterns are regexes — keep them metachar-free (the project
 # path contains '+', which silently never matches)
 start_pe() { # <model_id> <port> <logname> <mem_util>
-  ssh "$SSH_HOST" "nohup srun --jobid=$JOBID --overlap bash $REMOTE_DIR/scripts/pe_server.sh $1 $NODE_IP $2 $4 > $DATA_DIR/$3.log 2>&1 &"
+  ssh "$SSH_HOST" "nohup srun --jobid=$JOBID --overlap env DATA_DIR=$DATA_DIR bash $REMOTE_DIR/scripts/pe_server.sh $1 $NODE_IP $2 $4 > $DATA_DIR/$3.log 2>&1 &"
 }
 pe_health() { # <port> -> http code
   ssh "$SSH_HOST" "curl -s -o /dev/null -w '%{http_code}' --max-time 3 http://$NODE_IP:$1/health" || true

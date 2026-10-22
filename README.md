@@ -97,29 +97,46 @@ This local repo is the **source of truth**; the cluster copy executes.
    ssh coreweave-login true   # must succeed (silently)
    ```
 
-3. **W&B key + Weave project.** Create `.env` in the repo root (gitignored):
+3. **Your `.env`.** Create `.env` in the repo root (gitignored) — these values
+   are **yours**, not shared with other developers:
 
    ```bash
    echo 'WANDB_API_KEY=<your Forge/W&B key>' > .env
-   echo 'WEAVE_PROJECT=wandb-smle/jb_image_editing_tool' >> .env
+   echo 'WEAVE_PROJECT=<your-entity/your-project>' >> .env
+   echo 'CLUSTER_USER=<your-cluster-account>' >> .env   # e.g. jdoe+org01
    ```
 
    `scripts/sync.sh` copies the key — outside the rsync tree — into a
-   chmod-600 file on the cluster (`/mnt/data/jbutt+cwb607/.wandb_key`);
+   chmod-600 file on the cluster (`$DATA_DIR/.wandb_key`);
    `scripts/launch.sh` reads `WEAVE_PROJECT` from `.env` and exports it into
    the remote marimo process, so changing it in `.env` and relaunching
-   switches tracing projects. Both are optional: without either the app runs
-   identically but untraced.
+   switches tracing projects. The key and project are optional: without them
+   the app runs identically but untraced. `CLUSTER_USER` is also optional —
+   the scripts fall back to `ssh coreweave-login whoami` — but setting it
+   skips that round-trip.
 
-4. **Cluster prerequisites.** These already exist for the current deployment
-   under `/mnt/data/jbutt+cwb607/` — a new developer only needs to verify:
+   All cluster settings resolve per-user in `scripts/config.sh`
+   (override any of them in `.env` or the environment):
+
+   | Variable | Default |
+   |---|---|
+   | `CLUSTER_USER` | `ssh $SSH_HOST whoami` |
+   | `DATA_DIR` | `/mnt/data/$CLUSTER_USER` |
+   | `JOB_NAME` | `<user-without-+suffix>-interactive` |
+   | `SSH_HOST` | `coreweave-login` |
+
+   Everything below writes to **your** `$DATA_DIR` — the examples use
+   `/mnt/data/$CLUSTER_USER`; substitute your account.
+
+4. **Cluster prerequisites.** One-time, under your own `$DATA_DIR`. Check
+   what already exists:
 
    ```bash
-   ssh coreweave-login ls /mnt/data/jbutt+cwb607
-   # expect: bin/ (uv) · qwen2.1/ (project + .venv) · vllm-env/ · hf/
+   ssh coreweave-login 'ls /mnt/data/$(whoami)'
+   # want: bin/ (uv) · qwen2.1/ (project + .venv) · vllm-env/ · hf/
    ```
 
-   If any are missing, recreate them:
+   Create whatever is missing:
 
    - **`bin/uv`** — the uv binary the scripts use for remote dependency syncs.
    - **`qwen2.1/` + app venv** — project copy with a **uv-managed Python 3.10**
@@ -129,7 +146,7 @@ This local repo is the **source of truth**; the cluster copy executes.
 
      ```bash
      ssh coreweave-login
-     cd /mnt/data/jbutt+cwb607
+     cd /mnt/data/$(whoami)
      bin/uv venv --python 3.12 vllm-env
      bin/uv pip install --python vllm-env/bin/python vllm ninja
      ```
@@ -137,7 +154,7 @@ This local repo is the **source of truth**; the cluster copy executes.
    - **`hf/`** — model weights pre-downloaded into `HF_HOME`, e.g.:
 
      ```bash
-     export HF_HOME=/mnt/data/jbutt+cwb607/hf
+     export HF_HOME=/mnt/data/$(whoami)/hf
      hf download Qwen/Qwen-Image-2.1           # image pipeline (GPU 0)
      hf download Qwen/Qwen-Image-2.1-PE-T2I    # prompt enhancers (GPU 1)
      hf download Qwen/Qwen-Image-2.1-PE-I2I
@@ -164,11 +181,11 @@ This local repo is the **source of truth**; the cluster copy executes.
 6. **Sanity checks:**
 
    ```bash
-   ssh coreweave-login tail -f /mnt/data/jbutt+cwb607/marimo.log   # stage logs
+   ssh coreweave-login 'tail -f /mnt/data/$(whoami)/marimo.log'   # stage logs
    ```
 
-   and, after one generation, confirm a trace landed in
-   [wandb-smle/jb_image_editing_tool](https://wandb.ai/wandb-smle/jb_image_editing_tool/weave).
+   and, after one generation, confirm a trace landed in your `WEAVE_PROJECT`
+   at `https://wandb.ai/<your-entity/your-project>/weave`.
 
 ## Once Setup - Run the Following
 
@@ -176,7 +193,7 @@ This local repo is the **source of truth**; the cluster copy executes.
 # One command, from the repo root on your Mac:
 scripts/launch.sh
 # 1. rsync the repo to the cluster (scripts/sync.sh)
-# 2. find or submit the 2-GPU Slurm job (name jbutt-interactive, 24 h)
+# 2. find or submit the 2-GPU Slurm job (name $JOB_NAME, 24 h)
 # 3. health-check / start the two prompt-enhancement vLLM servers on GPU 1
 # 4. (re)start marimo on GPU 0 with all env wired up
 # 5. open the SSH tunnel localhost:2718 -> compute node
@@ -199,7 +216,7 @@ scripts/stop.sh --release       # ... and cancel the Slurm job (frees both GPUs)
 A cold start (fresh Slurm job) repeats the setup-step-5 timings: ~5–10 min for
 the PE servers, ~2–4 min pipeline load on the first generation. Logs live on
 the cluster next to the project: `marimo.log`, `pe_t2i.log`, `pe_i2i.log` in
-`/mnt/data/jbutt+cwb607/`.
+your `$DATA_DIR`.
 
 ## Tracing
 

@@ -10,7 +10,8 @@
 set -euo pipefail
 
 MODEL=$1; HOST=$2; PORT=$3; MEM_UTIL=$4
-DATA_DIR=/mnt/data/jbutt+cwb607
+# launch.sh passes DATA_DIR through srun env; fall back to this node account
+DATA_DIR="${DATA_DIR:-/mnt/data/$(whoami)}"
 
 export CUDA_VISIBLE_DEVICES=1
 export HF_HOME="$DATA_DIR/hf"

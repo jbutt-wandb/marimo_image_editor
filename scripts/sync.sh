@@ -3,10 +3,9 @@
 # changed, re-sync the remote venv with uv and pull the updated uv.lock back.
 set -euo pipefail
 
-SSH_HOST="${SSH_HOST:-coreweave-login}"
-DATA_DIR=/mnt/data/jbutt+cwb607
-REMOTE_DIR="$DATA_DIR/qwen2.1"
 LOCAL_DIR="$(cd "$(dirname "$0")/.." && pwd)"
+# SSH_HOST / CLUSTER_USER / DATA_DIR / REMOTE_DIR — per-user, see config.sh
+source "$LOCAL_DIR/scripts/config.sh"
 UV="UV_CACHE_DIR=$DATA_DIR/cache/uv UV_PYTHON_INSTALL_DIR=$DATA_DIR/uv-python UV_PYTHON_PREFERENCE=only-managed $DATA_DIR/bin/uv"
 
 FORCE_DEPS=0
