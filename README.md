@@ -311,7 +311,9 @@ the new one is ready (`--keep-old` keeps it); running sandboxes are untouched
 and pick up the new snapshot at their next creation. Because reseed only ever
 *adds* to the mount, use a full rebuild when you want to prune (removed
 models, layout changes): `scripts/stop.sh --delete-snapshot`, then
-`scripts/launch.sh --seed`.
+`scripts/launch.sh --seed`. A failed reseed is harmless — it retries the
+snapshot five times, and if the platform's snapshot service is having a bad
+day your old snapshot and state stay exactly as they were; just re-run later.
 
 **Custom image (the path going forward).** The stock PyTorch image the
 launcher defaults to is missing tools the stack needs (git, gcc), which the

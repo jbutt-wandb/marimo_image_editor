@@ -226,6 +226,14 @@ URLs), `WANDB_API_KEY` + `WEAVE_PROJECT` (from the local `.env`, via sandbox
   launcher prints a note so this isn't mistaken for a hang, and treats >15 min
   in CREATING as wedged (observed live): it deletes the stuck sandbox and
   recreates.
+- **Snapshot creation stages a full tar of the mount ON the mount** (seen
+  live: `/work/.cw-object-store-agent-*.tar`, mount-sized), so a snapshot
+  transiently needs ~2× the payload in mount space — the real payload budget
+  is about **half** of the 200 Gi mount. The launcher prunes before every
+  snapshot (`uv cache prune --ci` keeps source-built wheels like the git
+  diffusers build but drops ~12 GB of re-downloadable ones) and sweeps stale
+  staging tars between retries: a failed attempt can leave its tar behind,
+  and every later attempt then snapshots payload + tar and dies on size.
 - **The `pytorch/*-runtime` image is missing two tools the stack silently
   depends on** — the launcher's `_ensure_build_tools` apt-installs both in
   every sandbox (idempotent, ~45 s on first run), and because apt writes to
