@@ -204,6 +204,15 @@ URLs), `WANDB_API_KEY` + `WEAVE_PROJECT` (from the local `.env`, via sandbox
   - **`git`.** `pyproject.toml` pins diffusers to a git commit (the Qwen
     pipeline class is unreleased), and `uv sync` shells out to git whenever
     the built wheel isn't already in the `/work` uv cache.
+  - **The CUDA toolkit (`nvcc`) is missing too** — vLLM 0.32's engine init
+    runs FlashInfer JIT warmups that need nvcc unless the precompiled wheels
+    (`flashinfer-cubin` + `flashinfer-jit-cache`) are installed. Deferred the
+    same way: weights load and CUDA graphs capture fine, then ~3 min in the
+    engine dies with `Could not find nvcc and default cuda_home=
+    '/usr/local/cuda' doesn't exist`. Unlike the apt tools this fix *does*
+    snapshot: `_ensure_vllm_kernels` installs the wheels into the vLLM venv's
+    site-packages under `/work` (seed bakes them in; `_start_vllm` self-heals
+    older snapshots).
 - **Never run a server via attached `exec`** — it dies at the SDK's ~300 s
   request timeout. Servers start detached (`nohup … &`) with `sleep infinity`
   as the sandbox's main command; long steps (seeding, `uv sync`) run detached

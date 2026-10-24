@@ -409,6 +409,12 @@ def cmd_seed(_args) -> None:
             f"{UV} pip install --python {MOUNT}/vllm-env/bin/python vllm ninja",
             timeout=2400,
         )
+        # Bake FlashInfer's precompiled kernels into the snapshot so forked pe
+        # sandboxes never JIT-compile (no nvcc in the image) — see
+        # _ensure_vllm_kernels for the full story. Works on this CPU-only
+        # sandbox: the wheel choice keys off torch's compiled CUDA version,
+        # not a GPU.
+        _ensure_vllm_kernels(sb)
 
         # Model weights into HF_HOME under the mount. Qwen-Image models are
         # public — no HF token needed. huggingface_hub comes with the app venv
@@ -557,6 +563,40 @@ def _ensure_build_tools(sb: Sandbox) -> None:
        timeout=280)
 
 
+def _ensure_vllm_kernels(sb: Sandbox) -> None:
+    """Install FlashInfer's precompiled kernel wheels into the vLLM venv —
+    learned the hard way (cost a full model-load cycle per attempt), so the
+    WHY in full:
+
+    The pytorch *-runtime* image ships NO CUDA toolkit (no nvcc, no
+    /usr/local/cuda). vLLM 0.32's engine init runs JIT kernel warmups
+    (KernelConfig enable_jit_warmup/enable_cutedsl_warmup) in which FlashInfer
+    compiles ops via its cpp_ext path — which hard-requires nvcc UNLESS its
+    precompiled wheels (flashinfer-cubin + flashinfer-jit-cache) are
+    installed. The failure is maximally deferred: weights load and CUDA
+    graphs capture fine, then ~3 min in the engine dies with
+    'RuntimeError: Could not find nvcc and default cuda_home="/usr/local/cuda"
+    doesn't exist' (seen live on the pe sandbox, RTX PRO 6000).
+
+    `vllm download-kernels` installs exactly the right wheel pins but shells
+    out to `python -m pip` — and uv venvs ship WITHOUT pip, so bootstrap it
+    with ensurepip first. Everything lands in the venv's site-packages under
+    /work, so it SNAPSHOTS (unlike the apt installs in _ensure_build_tools):
+    seed bakes it in once and forks inherit it; the import probe then makes
+    this an instant no-op. Kept as a runtime guard too so pe sandboxes forked
+    from pre-fix snapshots self-heal (~2 min download)."""
+    probe = sh(sb, f"{MOUNT}/vllm-env/bin/python -c "
+                   f"'import flashinfer_cubin, flashinfer_jit_cache' 2>/dev/null "
+                   f"&& echo KERNELS_OK")
+    if "KERNELS_OK" in (probe.stdout or ""):
+        return
+    run_long(sb, "download-kernels",
+             f"{MOUNT}/vllm-env/bin/python -m ensurepip --upgrade && "
+             f"PATH={MOUNT}/vllm-env/bin:$PATH HF_HOME={MOUNT}/hf "
+             f"{MOUNT}/vllm-env/bin/vllm download-kernels",
+             timeout=1800)
+
+
 def _start_vllm(sb: Sandbox, model: str, port: int, mem_util: float) -> None:
     """Detached vLLM server (was pe_server.sh). Flags mirror the official
     prompt_rewrite/serve.sh (reasoning parser, mm limit, bf16).
@@ -568,6 +608,7 @@ def _start_vllm(sb: Sandbox, model: str, port: int, mem_util: float) -> None:
     already allocated, so concurrent startup makes the free-memory math race.
     """
     _ensure_build_tools(sb)
+    _ensure_vllm_kernels(sb)  # no-op when the snapshot already carries them
     log = f"{MOUNT}/logs/pe_{port}.log"
     # $PE_API_TOKEN expands INSIDE the sandbox from its creation env — the
     # secret never crosses our argv. PATH: vllm shells out to ninja
