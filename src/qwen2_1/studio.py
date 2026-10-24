@@ -90,8 +90,13 @@ def build_enhancer(task):
         return None
     from agents import Agent, AsyncOpenAI, ModelSettings, OpenAIChatCompletionsModel
 
-    # chat-completions model class is required: vLLM has no Responses API
-    client = AsyncOpenAI(base_url=base_url.rstrip("/") + "/v1", api_key="dummy")
+    # chat-completions model class is required: vLLM has no Responses API.
+    # PE_API_KEY: the vLLM endpoints are public HTTPS now, so they enforce
+    # bearer auth (--api-key); "dummy" keeps local/no-auth setups working.
+    client = AsyncOpenAI(
+        base_url=base_url.rstrip("/") + "/v1",
+        api_key=os.environ.get("PE_API_KEY", "dummy"),
+    )
     agent = Agent(
         name=cfg["agent_name"],
         instructions=(_PROMPTS_DIR / cfg["system_prompt"]).read_text(),

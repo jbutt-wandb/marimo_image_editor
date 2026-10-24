@@ -1,35 +1,8 @@
 #!/usr/bin/env bash
-# Tear down: close the tunnel and stop marimo. --release also cancels the
-# Slurm job (freeing the GPU).
+# Tear down the app's sandboxes (billing stops). All logic in scripts/sandbox.py.
+#   scripts/stop.sh                     # keep the snapshot for fast relaunch
+#   scripts/stop.sh --delete-snapshot   # also drop the snapshot (re-seed needed)
 set -euo pipefail
-
-LOCAL_DIR="$(cd "$(dirname "$0")/.." && pwd)"
-# SSH_HOST / CLUSTER_USER / DATA_DIR / JOB_NAME / REMOTE_DIR — per-user, see config.sh
-source "$LOCAL_DIR/scripts/config.sh"
-STATE_DIR="$LOCAL_DIR/.launch"
-
-RELEASE=0
-[[ "${1:-}" == "--release" ]] && RELEASE=1
-
-if [[ -f "$STATE_DIR/tunnel.pid" ]]; then
-  kill "$(cat "$STATE_DIR/tunnel.pid")" 2>/dev/null && echo "Tunnel closed." || true
-  rm -f "$STATE_DIR/tunnel.pid"
-fi
-
-JOBID=""
-[[ -f "$STATE_DIR/state" ]] && JOBID=$(sed -n 's/^JOBID=//p' "$STATE_DIR/state")
-[[ -z "$JOBID" ]] && JOBID=$(ssh "$SSH_HOST" "squeue --me --name=$JOB_NAME -h -o %A -t RUNNING | head -1")
-
-if [[ -n "$JOBID" ]]; then
-  ssh "$SSH_HOST" "srun --jobid=$JOBID --overlap pkill -f 'bin/marimo' || true" \
-    && echo "marimo stopped."
-  ssh "$SSH_HOST" "srun --jobid=$JOBID --overlap pkill -f 'bin/vllm' || true" \
-    && echo "prompt enhancers stopped."
-  if [[ $RELEASE == 1 ]]; then
-    ssh "$SSH_HOST" "scancel $JOBID" && echo "Job $JOBID cancelled."
-  else
-    echo "Job $JOBID left running (use --release to free the GPU)."
-  fi
-else
-  echo "No running job found."
-fi
+cd "$(dirname "$0")/.."
+# --python 3.12: cwsandbox needs >=3.11 (repo .python-version is 3.10)
+exec uv run --python 3.12 scripts/sandbox.py down "$@"
