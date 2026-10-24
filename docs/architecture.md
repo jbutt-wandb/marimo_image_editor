@@ -50,14 +50,44 @@ sandbox environments and in `.launch/sandbox-state.json` (chmod 600).
 
 All logic is in `scripts/sandbox.py` (a standalone uv PEP 723 script —
 cwsandbox needs Python ≥3.11 while the app venv is 3.10, so run it with
-`uv run --python 3.12 scripts/sandbox.py <cmd>`; the wrappers do this for
-you). State persists in `.launch/sandbox-state.json`.
+`uv run --no-project --python 3.12 scripts/sandbox.py <cmd>`; the wrappers do
+this for you, and `--no-project` stops uv from rebuilding the repo's 3.10 app
+venv first). State persists in `.launch/sandbox-state.json`. Operational
+knobs are subcommand flags and `.env` (keys, `SNAPSHOT_ID` adoption,
+`SANDBOX_IMAGE` custom-image override); the topology — which sandboxes exist,
+their ports, models, and resources — is deliberately the constants block at
+the top of `sandbox.py`, not CLI args. That block is the configuration
+surface: edit it, then reseed/relaunch.
+
+**The architecture itself is yours to change.** The two-sandbox split (app +
+pipeline on one GPU, both enhancers sharing the other) is just the layout
+that mirrors the original cluster — not a constraint. To redistribute the
+GPUs, edit `sandbox.py` directly; the relevant pieces are deliberately small
+and legible:
+
+- *Shape-preserving tweaks* (swap a model, move a port, resize cpu/memory,
+  change the memory split between the two vLLM servers): one-line edits to
+  the constants block or the `0.45`/`0.53` arguments in `cmd_up`.
+- *Structural changes* (e.g. a third GPU sandbox so each enhancer gets its
+  own card — removes the memory split and the sequential start; or dropping
+  the enhancers entirely for a single-sandbox app): copy the ~30-line
+  `_create_pe` / `_start_vllm` pattern per new sandbox and adjust the
+  bootstrap order in `cmd_up`. Each sandbox is created by one `_create_*`
+  function and bootstrapped by one `_start_*` function — that pairing is the
+  whole pattern.
+- *Multi-GPU in one sandbox* (restoring the original single-box layout)
+  requires CKS placement rather than serverless — see the gotchas below;
+  it's a different platform mode, not a constants edit.
+
+After any topology change: `reseed` if the snapshot contents changed (new
+models/venvs), then `stop.sh` + `launch.sh` to roll the new layout.
 
 | Command | What happens |
 |---|---|
 | `sandbox.py probe` | ~1-min GPU entitlement check (GPU sandboxes are private preview): creates a 1-GPU sandbox, prints `nvidia-smi -L`, deletes it. Unentitled orgs fail at create in <2 s, nothing billed |
 | `launch.sh --seed` (`seed`) | One-time, **CPU-only** sandbox (~30–60 min): installs uv under `/work/bin`, uploads the repo, builds the app venv (`uv sync`, py 3.10) and a separate vLLM venv (py 3.12), downloads all three models into `/work/hf`, snapshots `/work`, saves `snapshot_id`, deletes the seed sandbox |
-| `launch.sh` (`up`) | Reuse if both sandboxes are RUNNING (re-push code, restart marimo); else create studio+pe **in parallel** (~1 min), each on a snapshot fork → start PE-T2I detached → upload code + `uv sync` + start marimo → wait for health (PE-I2I starts after T2I is healthy) → print+open the tokenized URL. Ready ~3–5 min. On failure, reaps everything by tag |
+| `sandbox.py reseed` | **Incremental snapshot refresh** (minutes, not another full seed): fork the current snapshot onto a CPU-only sandbox, apply only the delta (code push, `uv sync`, vLLM kernel wheels, any missing models), mid-life snapshot the running fork, save the new `snapshot_id`, delete the old snapshot once the new one is READY (`--keep-old` skips that). Running sandboxes are untouched. Full `seed` remains the path for clean rebuilds (reseed only ever adds to the mount) |
+| `launch.sh` (`up`) | Reuse if both sandboxes are RUNNING (re-push code, restart marimo); else create studio+pe **in parallel** (~1 min to admit, ~4 min to restore the fork), each on a snapshot fork → start PE-T2I detached → upload code + `uv sync` + start marimo → wait for health (PE-I2I starts after T2I is healthy) → print+open the tokenized URL. Ready ~3–5 min. On failure, reaps everything by tag. `--snapshot-id <id>` (or `SNAPSHOT_ID` in `.env`) adopts an existing org snapshot into state — a new developer on a seeded team skips seeding entirely (org snapshots should be adoptable; if the restore fails, seed yourself) |
 | `sync.sh` (`sync`) | Push local code to the running studio sandbox, `uv sync` (no-op unless deps changed), restart marimo |
 | `stop.sh` (`down`) | Delete every sandbox tagged `image-studio` — billing stops; the snapshot is kept. `--delete-snapshot` also deletes the snapshot (next launch needs `--seed`) |
 | `sandbox.py status` | List this app's sandboxes with role, state, and URLs; show launch time and snapshot id |
@@ -164,7 +194,7 @@ URLs), `WANDB_API_KEY` + `WEAVE_PROJECT` (from the local `.env`, via sandbox
 | `scripts/launch.sh [--seed]` | Mac | Default: `sandbox.py up` (create-or-reuse both sandboxes, start servers, print+open the tokenized URL). `--seed`: `sandbox.py seed` (one-time snapshot build) |
 | `scripts/sync.sh` | Mac | `sandbox.py sync` — tarball-push the repo to `/work/app` on the running studio sandbox (excludes `.venv .git .env outputs .launch` + caches), conditional `uv sync`, restart marimo |
 | `scripts/stop.sh [--delete-snapshot]` | Mac | `sandbox.py down` — delete all `image-studio` sandboxes (billing stops; snapshot kept unless `--delete-snapshot`) |
-| `uv run --python 3.12 scripts/sandbox.py <probe\|status>` | Mac | Entitlement probe / sandbox listing (no wrapper; note the explicit `--python 3.12`) |
+| `uv run --no-project --python 3.12 scripts/sandbox.py <probe\|reseed\|status>` | Mac | Entitlement probe / incremental snapshot refresh / sandbox listing (no wrapper; note the explicit `--no-project --python 3.12`) |
 
 ## Failure and fallback behavior
 
@@ -191,11 +221,20 @@ URLs), `WANDB_API_KEY` + `WEAVE_PROJECT` (from the local `.env`, via sandbox
   a fork — not the container image's changes, processes, or GPU memory.
   Everything the app needs at runtime (venvs, uv itself, `HF_HOME`, logs)
   lives under `/work`; there is no "snapshot a loaded model".
+- **Fork-restore boot is ~4 min at this snapshot's size (~78 GB).** A sandbox
+  created from a snapshot fork sits in CREATING while the mount restores — the
+  launcher prints a note so this isn't mistaken for a hang, and treats >15 min
+  in CREATING as wedged (observed live): it deletes the stuck sandbox and
+  recreates.
 - **The `pytorch/*-runtime` image is missing two tools the stack silently
   depends on** — the launcher's `_ensure_build_tools` apt-installs both in
   every sandbox (idempotent, ~45 s on first run), and because apt writes to
   the container layer rather than `/work`, a snapshot can never carry them —
-  every fresh sandbox needs them again:
+  every fresh sandbox needs them again. **Going forward**: the repo-root
+  `Dockerfile` bakes the tools into a custom image; build + push it and set
+  `SANDBOX_IMAGE=<registry>/...@sha256:<digest>` in `.env` (the launcher
+  picks it up — no code edit) and the runtime guards become no-ops. The two
+  gaps:
   - **A C compiler (`gcc` + `libc6-dev`).** Triton JIT-compiles a small host
     C extension at the **first kernel launch** — torch imports fine, the
     model loads into VRAM fine, and only the first real generation fails

@@ -16,6 +16,39 @@ For a deeper understanding of how the app works and the underlying model and arc
 | [`docs/architecture.md`](docs/architecture.md) | Components, request lifecycle, compute table, scripts, failure modes, gotchas |
 | [`docs/model.md`](docs/model.md) | Qwen-Image-2.1 capabilities, resolutions, prompting tips, PE models |
 
+## How the App Uses the CoreWeave Stack
+
+The design leans on three layers, each doing the one job it's best at:
+
+- **[CoreWeave Sandboxes](https://docs.coreweave.com/products/sandboxes)
+  (serverless GPUs) — the compute.** Two single-GPU sandboxes are created on
+  demand: one runs this marimo app with the Qwen-Image-2.1 diffusers pipeline
+  in-process; the other hosts the two vLLM prompt-enhancement servers on a
+  shared GPU. Model weights and venvs live in a **filesystem snapshot** that
+  every launch forks instantly, so spinning the whole app up takes minutes and
+  tearing it down (`scripts/stop.sh`) stops all GPU billing — there is no
+  always-on infrastructure. The sandboxes' public HTTPS endpoints replace any
+  VPN/SSH plumbing: the app authenticates with marimo's token auth, and the
+  enhancer servers with a vLLM API key.
+
+- **[Forge Weave](https://weave-docs.wandb.ai) (W&B) — the memory.** Every
+  generation becomes a trace: the prompt-enhancement agent run (OpenAI Agents
+  SDK) and the diffusion call nest under one task-named root, agents appear in
+  the Agents view, and each output lands — full parameter recipe plus
+  before/after images — in the versioned `image-generation-log` dataset,
+  usable later as distillation/fine-tuning data. Weave is the system of
+  record: generated images are **not** stored on sandbox disk at all.
+
+- **[marimo](https://marimo.io) — the interface.** A reactive Python notebook
+  served as a web app: the UI, the pipeline, and the agent orchestration are
+  one Python process, so there is no separate frontend/backend to deploy. Its
+  `--watch` mode hot-reloads `app.py` on every `scripts/sync.sh`, keeping the
+  edit-to-live loop seconds long.
+
+The through-line: ephemeral compute (sandboxes) + durable observability
+(Weave) + a single-process app (marimo) means the entire deployment is one
+command up, one command down, with nothing lost in between.
+
 ## How the App Works
 
 A quick tour of the running app at the tokenized URL `scripts/launch.sh`
@@ -97,10 +130,12 @@ scripts push to them.
    not shared with other developers:
 
    ```bash
-   echo 'CWSANDBOX_API_KEY=<your CoreWeave console token>' > .env
-   echo 'WANDB_API_KEY=<your Forge/W&B key>' >> .env
-   echo 'WEAVE_PROJECT=<your-entity/your-project>' >> .env
+   cp .env_example .env   # then fill in your values
    ```
+
+   (`.env_example` documents every supported key, including the optional
+   `SNAPSHOT_ID` for joining a team setup and `SANDBOX_IMAGE` for a custom
+   image.)
 
    `CWSANDBOX_API_KEY` is **required** — it is how the launcher creates and
    drives the sandboxes. `WANDB_API_KEY` and `WEAVE_PROJECT` are optional:
@@ -114,8 +149,13 @@ scripts push to them.
    on, and tears it down (costs cents):
 
    ```bash
-   uv run --python 3.12 scripts/sandbox.py probe
+   uv run --no-project --python 3.12 scripts/sandbox.py probe
    ```
+
+   (`--no-project` matters whenever you call `sandbox.py` directly: without
+   it, uv rebuilds the repo's Python 3.10 app venv against 3.12 before
+   running. The wrapper scripts handle this for you. If it happens, `uv sync`
+   restores the venv.)
 
    If it fails with "not entitled to create GPU sandboxes" (within ~2
    seconds, nothing billed), ask your CoreWeave account team for GPU-sandbox
@@ -132,6 +172,18 @@ scripts push to them.
    filesystem snapshot. Expect **~30–60 min**, with a one-line progress
    heartbeat per minute. Every later launch mounts an instant fork of this
    snapshot, which is why day-to-day launches are fast.
+
+   **Joining an existing team setup?** (New developers only — if you seeded
+   on this machine, your snapshot id is already in
+   `.launch/sandbox-state.json` and you need none of this; `SNAPSHOT_ID` in
+   `.env` is only consulted when that local state has no snapshot.) Skip
+   seeding by adopting a teammate's snapshot: get the snapshot id from them
+   (`sandbox.py status` prints it), then add `SNAPSHOT_ID=<id>` to your
+   `.env` — or launch once with `uv run --no-project --python 3.12
+   scripts/sandbox.py up --snapshot-id <id>`. The id is saved into your local
+   launcher state and every later `scripts/launch.sh` uses it. Org snapshots
+   should be adoptable across users in the same org; if the restore fails,
+   fall back to your own `scripts/launch.sh --seed`.
 
 5. **First launch:**
 
@@ -157,7 +209,7 @@ scripts push to them.
 6. **Sanity checks:**
 
    ```bash
-   uv run --python 3.12 scripts/sandbox.py status
+   uv run --no-project --python 3.12 scripts/sandbox.py status
    # studio  <sandbox-id>  RUNNING  https://2718-…cwsandbox.com
    # pe      <sandbox-id>  RUNNING  https://8001-…  https://8002-…
    # launched: <timestamp>
@@ -171,33 +223,113 @@ scripts push to them.
    id from `status`). After one generation, confirm a trace landed in your
    `WEAVE_PROJECT` at `https://wandb.ai/<your-entity/your-project>/weave`.
 
-## Once Setup - Run the Following
+## After Initial Setup - Run Scripts (step by step)
+
+Day-to-day operation after [Setup](#setup-first-time), using only the
+scripts, from the repo root on your Mac.
+
+1. **Launch:**
+
+   ```bash
+   scripts/launch.sh
+   ```
+
+   It reuses the running sandboxes if both are still up; otherwise it creates
+   the studio + pe pair in parallel, each on a fork of the seeded snapshot.
+   Expect, in order: a printed note that restoring the ~78 GB snapshot takes
+   **~4 min** per sandbox (they are not hung), the code push to the studio
+   sandbox (this local repo is the source of truth), the two
+   prompt-enhancement vLLM servers loading (**~2–4 min**; the launch continues
+   even if they fail — the app then falls back to raw prompts), marimo
+   starting, and finally the line that matters:
+
+   ```
+   ✅ ready: https://2718-<sandbox-id>.<hash>.cwsandbox.com/?access_token=<token>
+   ```
+
+   On macOS that URL opens automatically. The `access_token` is required —
+   the endpoint is on the public internet and marimo's token auth is the only
+   access control.
+
+2. **Lost the URL?** Rebuild it from the state file at any time:
+
+   ```bash
+   python3 -c "import json; s = json.load(open('.launch/sandbox-state.json')); \
+   print(f\"{s['studio_url']}/?access_token={s['app_token']}\")"
+   ```
+
+3. **Check health** whenever something looks off:
+
+   ```bash
+   uv run --no-project --python 3.12 scripts/sandbox.py status
+   ```
+
+   Both `studio` and `pe` should show `RUNNING` with their URLs. Service logs
+   live inside each sandbox under `/work/logs/` (`marimo.log` on studio,
+   `pe_8001.log` / `pe_8002.log` on pe).
+
+4. **Push code changes** to the running app:
+
+   ```bash
+   scripts/sync.sh
+   ```
+
+   Edits to `app.py` alone hot-reload via marimo's `--watch`; anything under
+   `src/` needs this sync — it re-pushes the repo, runs `uv sync` (a no-op
+   unless dependencies changed), and restarts marimo. Same URL, same token.
+
+5. **Take it down** when you're done (sandboxes bill per millisecond while
+   running):
+
+   ```bash
+   scripts/stop.sh                     # delete both sandboxes — billing stops
+   scripts/stop.sh --delete-snapshot   # full teardown: also drop the snapshot
+   ```
+
+6. **What persists after a plain stop:** the snapshot (billed per GiB-hr of
+   storage — it is what makes the next `scripts/launch.sh` a ~3–5 min
+   relaunch instead of a re-seed) and `.launch/sandbox-state.json` (the
+   snapshot id and access tokens, so bookmarked URLs keep working across
+   relaunches). `--delete-snapshot` removes the snapshot too; the next launch
+   then needs `--seed` again.
+
+### Updating the snapshot
+
+The snapshot is a build artifact — refresh it whenever sandboxes should start
+with something new baked in (a dependency bump in `uv.lock`, a new model in
+the launcher constants, a runtime fix worth persisting):
 
 ```bash
-# One command, from the repo root on your Mac:
-scripts/launch.sh
-# 1. reuse the running sandboxes if both are still up; otherwise create the
-#    studio + pe sandboxes in parallel, each on a fork of the seeded snapshot
-# 2. push this repo's code to the studio sandbox (local repo is truth)
-# 3. start the two prompt-enhancement vLLM servers on the pe sandbox
-# 4. (re)start marimo on the studio sandbox with all env wired up
-# 5. print + open the tokenized URL:
-#    https://2718-<sandbox-id>.<hash>.cwsandbox.com/?access_token=<token>
+uv run --no-project --python 3.12 scripts/sandbox.py reseed
 ```
 
-Variants and teardown:
+`reseed` forks the current snapshot onto a cheap CPU-only sandbox, applies
+only the delta (code push, `uv sync`, vLLM kernel wheels, any missing model
+downloads), snapshots the result, and swaps your state over to the new id —
+**minutes**, versus the ~hour of a full seed. The old snapshot is deleted once
+the new one is ready (`--keep-old` keeps it); running sandboxes are untouched
+and pick up the new snapshot at their next creation. Because reseed only ever
+*adds* to the mount, use a full rebuild when you want to prune (removed
+models, layout changes): `scripts/stop.sh --delete-snapshot`, then
+`scripts/launch.sh --seed`.
+
+**Custom image (the path going forward).** The stock PyTorch image the
+launcher defaults to is missing tools the stack needs (git, gcc), which the
+scripts currently re-install into every fresh sandbox at runtime (~45 s). The
+repo-root `Dockerfile` bakes them in permanently. To adopt it — no code
+changes required:
 
 ```bash
-scripts/sync.sh                      # push code to the running studio sandbox
-                                     # and restart marimo (changes under src/
-                                     # need this; app.py alone hot-reloads
-                                     # via --watch)
-scripts/stop.sh                      # delete both sandboxes — billing stops;
-                                     # the snapshot is KEPT for fast relaunch
-scripts/stop.sh --delete-snapshot    # ... and delete the snapshot too
-                                     # (the next launch needs --seed again)
-uv run --python 3.12 scripts/sandbox.py status   # list sandboxes, URLs, snapshot
+docker build --platform linux/amd64 -t <registry>/image-studio-base:v1 .
+docker push <registry>/image-studio-base:v1
+echo 'SANDBOX_IMAGE=<registry>/image-studio-base@sha256:<digest>' >> .env
 ```
+
+The launcher reads `SANDBOX_IMAGE` from `.env` and uses it for every sandbox
+it creates; the runtime install guards then become instant no-ops. Pin by
+digest (not tag) so launches stay reproducible across the heterogeneous GPU
+pool. Until you build and push, everything works on the stock image — the
+guards cover the gap.
 
 **Billing note.** Serverless sandboxes bill **per millisecond while running**
 (CPU-core-hr and GiB-hr rates; GPU rates via your account team) — run
@@ -208,6 +340,15 @@ drop it with `--delete-snapshot`.
 
 Launcher state — sandbox ids, URLs, and the access tokens — lives in
 `.launch/sandbox-state.json` (chmod 600, gitignored). Never commit it.
+
+**Configuration.** The operational knobs are flags and `.env`: `--seed`,
+snapshot adoption via `--snapshot-id`/`SNAPSHOT_ID`, `stop.sh
+--delete-snapshot`, a custom container image via `SANDBOX_IMAGE`, and your
+keys/Weave project in `.env`. The topology — which sandboxes exist, their
+ports, models, and resources — is deliberately **not** flag-driven: it lives
+in the constants block at the top of `scripts/sandbox.py`, and that block is
+the configuration surface. Edit it there, then `reseed` (new models/deps) or
+relaunch as appropriate.
 
 ## Tracing
 
