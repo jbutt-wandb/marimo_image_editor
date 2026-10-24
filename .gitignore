@@ -24,3 +24,6 @@ outputs/
 # Launch-script state
 .launch/
 
+
+# Internal platform-feedback log (shared with the sandbox team, not the repo)
+sandbox_implementation_issues.md

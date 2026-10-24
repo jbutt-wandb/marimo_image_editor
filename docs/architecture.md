@@ -191,6 +191,19 @@ URLs), `WANDB_API_KEY` + `WEAVE_PROJECT` (from the local `.env`, via sandbox
   a fork — not the container image's changes, processes, or GPU memory.
   Everything the app needs at runtime (venvs, uv itself, `HF_HOME`, logs)
   lives under `/work`; there is no "snapshot a loaded model".
+- **The `pytorch/*-runtime` image is missing two tools the stack silently
+  depends on** — the launcher's `_ensure_build_tools` apt-installs both in
+  every sandbox (idempotent, ~45 s on first run), and because apt writes to
+  the container layer rather than `/work`, a snapshot can never carry them —
+  every fresh sandbox needs them again:
+  - **A C compiler (`gcc` + `libc6-dev`).** Triton JIT-compiles a small host
+    C extension at the **first kernel launch** — torch imports fine, the
+    model loads into VRAM fine, and only the first real generation fails
+    (`RuntimeError: Failed to find C compiler`). Affects both sandboxes
+    (torch/diffusers Triton ops on studio, vLLM on pe).
+  - **`git`.** `pyproject.toml` pins diffusers to a git commit (the Qwen
+    pipeline class is unreleased), and `uv sync` shells out to git whenever
+    the built wheel isn't already in the `/work` uv cache.
 - **Never run a server via attached `exec`** — it dies at the SDK's ~300 s
   request timeout. Servers start detached (`nohup … &`) with `sleep infinity`
   as the sandbox's main command; long steps (seeding, `uv sync`) run detached

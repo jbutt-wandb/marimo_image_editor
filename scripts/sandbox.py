@@ -60,7 +60,10 @@ from cwsandbox import (
     EndpointKind,
     FileSystemSnapshotOptions,
     Sandbox,
+    SandboxResourceExhaustedError,
     SandboxStatus,
+    SandboxTimeoutError,
+    SandboxUnavailableError,
     Service,
     ServiceVisibility,
 )
@@ -219,6 +222,49 @@ def wait_http(sb: Sandbox, port: int, label: str, path: str = "/",
     return False
 
 
+def create_with_retry(label: str, wait_timeout: float = 900, **kwargs) -> Sandbox:
+    """Sandbox.run (keep-alive form) + wait-until-RUNNING, with retries for the
+    two transient platform failures seen live. Used by seed AND both `up`
+    creators.
+
+    - CreateSandbox can fail RESOURCE_EXHAUSTED ("runner capacity exhausted" /
+      gateway errors) when the serverless pool is momentarily full. Nothing is
+      created or billed on that failure — just back off and recreate.
+    - A created sandbox can also wedge in CREATING past the wait timeout
+      (observed live on a snapshot-fork GPU sandbox; normal fork boots are
+      ~4 min). Delete the stuck one and recreate — a fresh create usually
+      lands on a healthy runner.
+
+    Backoff grows 1..5 min (~15 min total patience on top of the waits).
+    """
+    for attempt in range(6):
+        sb = None
+        try:
+            sb = Sandbox.run(
+                "sleep", "infinity",  # keep-alive main process; work runs via exec
+                auth=AUTH,
+                container_image=IMAGE,
+                placement_mode="serverless",
+                **kwargs,
+            )
+            sb.wait(timeout=wait_timeout)
+            return sb
+        except SandboxResourceExhaustedError as e:
+            if attempt == 5:
+                raise
+            reason = f"capacity exhausted ({e})"
+        except SandboxTimeoutError:
+            if sb is not None:  # don't leave the wedged sandbox billing
+                Sandbox.delete(sb.sandbox_id, auth=AUTH, missing_ok=True).result()
+            if attempt == 5:
+                raise
+            reason = f"stuck in CREATING > {wait_timeout:.0f}s (deleted)"
+        wait = 60 * (attempt + 1)
+        print(f"  {label}: {reason}; retry {attempt + 1}/5 in {wait}s")
+        time.sleep(wait)
+    raise AssertionError("unreachable")
+
+
 def make_tarball() -> bytes:
     """gzip tarball of the repo (the code the sandboxes run), minus junk/secrets."""
     buf = io.BytesIO()
@@ -324,18 +370,14 @@ def cmd_seed(_args) -> None:
                  "run `scripts/stop.sh --delete-snapshot` first to rebuild")
 
     print("Creating CPU seed sandbox...")
-    sb = Sandbox.run(
-        "sleep", "infinity",
-        auth=AUTH,
-        container_image=IMAGE,
-        placement_mode="serverless",
+    sb = create_with_retry(  # pool capacity can be transiently exhausted
+        "seed",
         resources=SEED_RESOURCES,
         max_lifetime_seconds=SEED_LIFETIME,
         tags=[APP_TAG, f"{APP_TAG}-seed"],
         file_system_snapshot=FileSystemSnapshotOptions(mount_path=MOUNT, size=MOUNT_SIZE),
     )
     try:
-        sb.wait(timeout=600)
         print(f"Seed sandbox {sb.sandbox_id} running.")
 
         # uv itself must survive into forked sandboxes -> copy the static
@@ -344,6 +386,15 @@ def cmd_seed(_args) -> None:
                'cp "$(command -v uv)" /work/bin/uv', timeout=240)
 
         upload_code(sb)
+
+        # The pytorch runtime image ships NO git, but pyproject pins diffusers
+        # to a git commit — uv sync needs the git CLI to fetch/build it. Install
+        # it container-side (seed only): the built wheel lands in the uv cache
+        # under /work and survives into forks, so forked `uv sync` re-runs hit
+        # the cache instead of git.
+        run_long(sb, "apt-git",
+                 "apt-get update && apt-get install -y --no-install-recommends git",
+                 timeout=600)
 
         # App venv (python 3.10, from pyproject/uv.lock) at /work/app/.venv.
         run_long(sb, "app-venv", f"cd {MOUNT}/app && {UV} sync", timeout=2400)
@@ -372,8 +423,41 @@ def cmd_seed(_args) -> None:
                 timeout=7200,
             )
 
+        # Verify the payload BEFORE paying for the snapshot: forked sandboxes
+        # assume these exact paths; the rc-sentinels above prove each step
+        # exited 0 but not that it left the artifacts we expect.
+        required = [
+            f"{MOUNT}/app/.venv/bin/python",
+            f"{MOUNT}/vllm-env/bin/vllm",
+        ] + [
+            # snapshot_download with HF_HOME=/work/hf lands weights here
+            f"{MOUNT}/hf/hub/models--{m.replace('/', '--')}/snapshots"
+            for m in (PIPELINE_MODEL, PE_T2I_MODEL, PE_I2I_MODEL)
+        ]
+        checks = " && ".join(f"test -e {shlex.quote(p)}" for p in required)
+        if (sh(sb, f"{checks} && echo OK", timeout=120).stdout or "").strip() != "OK":
+            missing = sh(sb, "; ".join(
+                f"test -e {shlex.quote(p)} || echo MISSING {p}" for p in required),
+                timeout=120).stdout
+            raise RuntimeError(f"seed verification failed:\n{missing}")
+        print("Seed verified: app venv, vllm venv, and 3 model dirs present.")
+        print(sh(sb, f"du -sh {MOUNT}/hf {MOUNT}/app/.venv {MOUNT}/vllm-env 2>/dev/null; "
+                     f"df -h {MOUNT} | tail -1", timeout=300).stdout)
+
         print("Snapshotting /work (waits for READY — can take a few minutes)...")
-        snapshot_id = sb.snapshot().result()
+        # The snapshot RPC can fail with a transient gateway error even after
+        # the SDK's own retries (seen live: "Service unavailable: the owning
+        # gateway could not complete the CreateFileSystemSnapshot"). Don't let
+        # that discard a fully built mount — retry before giving up.
+        for attempt in range(5):
+            try:
+                snapshot_id = sb.snapshot().result()
+                break
+            except (SandboxUnavailableError, SandboxResourceExhaustedError) as e:
+                if attempt == 4:
+                    raise
+                print(f"  snapshot attempt failed ({e}); retry {attempt + 1}/4 in 60s")
+                time.sleep(60)
         state["snapshot_id"] = snapshot_id
         save_state(state)
         print(f"✅ snapshot ready: {snapshot_id}  (saved to {STATE_FILE})")
@@ -399,11 +483,8 @@ def _https_service(port: int, name: str) -> Service:
 
 
 def _create_pe(snapshot_id: str, pe_token: str) -> Sandbox:
-    sb = Sandbox.run(
-        "sleep", "infinity",  # keep-alive main process; servers launch detached
-        auth=AUTH,
-        container_image=IMAGE,
-        placement_mode="serverless",
+    sb = create_with_retry(  # GPU pool capacity can be transiently exhausted
+        "pe",
         resources=GPU_RESOURCES,
         max_lifetime_seconds=MAX_LIFETIME,
         tags=[APP_TAG, f"{APP_TAG}-pe"],
@@ -414,7 +495,6 @@ def _create_pe(snapshot_id: str, pe_token: str) -> Sandbox:
                   _https_service(PE_I2I_PORT, "pe-i2i")],
         file_system_snapshot=_fss_fork(snapshot_id),
     )
-    sb.wait(timeout=900)
     return sb
 
 
@@ -441,11 +521,8 @@ def _create_studio(snapshot_id: str, dotenv: dict[str, str],
         print("warning: WEAVE_PROJECT not set in .env - app will run untraced",
               file=sys.stderr)
 
-    sb = Sandbox.run(
-        "sleep", "infinity",
-        auth=AUTH,
-        container_image=IMAGE,
-        placement_mode="serverless",
+    sb = create_with_retry(  # GPU pool capacity can be transiently exhausted
+        "studio",
         resources=GPU_RESOURCES,
         max_lifetime_seconds=MAX_LIFETIME,
         tags=[APP_TAG, f"{APP_TAG}-studio"],
@@ -453,8 +530,31 @@ def _create_studio(snapshot_id: str, dotenv: dict[str, str],
         services=[_https_service(APP_PORT, "app")],
         file_system_snapshot=_fss_fork(snapshot_id),
     )
-    sb.wait(timeout=900)
     return sb
+
+
+def _ensure_build_tools(sb: Sandbox) -> None:
+    """Install the two tools the pytorch *-runtime* image is missing — learned
+    the hard way (each cost a debugging session), so the WHY in full:
+
+    - gcc + libc6-dev: Triton JIT-compiles a small host C extension (its CUDA
+      driver utils) at the FIRST kernel launch — so torch imports fine, the
+      model loads into VRAM fine, and only the first real generation dies with
+      'RuntimeError: Failed to find C compiler' (seen live on the studio
+      sandbox). Needed by studio (torch/diffusers triton ops) AND pe (vLLM).
+    - git: pyproject pins diffusers to a git commit (QwenImage21Pipeline is
+      not in any PyPI release), and `uv sync` shells out to the git CLI
+      whenever the built wheel isn't already in the /work uv cache (seen live
+      in seeding and as launch bootstrap failures).
+
+    apt installs land in the CONTAINER layer — NOT the /work snapshot (FSS
+    captures only the mount) — so every fresh sandbox/fork needs this again.
+    Idempotent: instant no-op when both are already present (~45 s otherwise).
+    Call before any `uv sync` and before starting marimo/vLLM."""
+    sh(sb, "command -v cc >/dev/null 2>&1 && command -v git >/dev/null 2>&1 || "
+           "(apt-get update -qq && "
+           "apt-get install -y -qq --no-install-recommends gcc libc6-dev git)",
+       timeout=280)
 
 
 def _start_vllm(sb: Sandbox, model: str, port: int, mem_util: float) -> None:
@@ -467,12 +567,17 @@ def _start_vllm(sb: Sandbox, model: str, port: int, mem_util: float) -> None:
     SEQUENTIALLY: vLLM sizes its KV cache against total memory minus what is
     already allocated, so concurrent startup makes the free-memory math race.
     """
+    _ensure_build_tools(sb)
     log = f"{MOUNT}/logs/pe_{port}.log"
     # $PE_API_TOKEN expands INSIDE the sandbox from its creation env — the
     # secret never crosses our argv. PATH: vllm shells out to ninja
     # (torch.compile); the venv's bin must be on PATH.
+    # The `( ... </dev/null &)` isolation matters: a child that inherits ANY of
+    # the exec session's fds keeps the exec stream open and sh() then hangs to
+    # the SDK's 300 s cap (bit us live on the marimo start). Same pattern as
+    # run_long().
     sh(sb, f"mkdir -p {MOUNT}/logs && "
-           f"CUDA_VISIBLE_DEVICES=0 PATH={MOUNT}/vllm-env/bin:$PATH "
+           f"(CUDA_VISIBLE_DEVICES=0 PATH={MOUNT}/vllm-env/bin:$PATH "
            f"nohup {MOUNT}/vllm-env/bin/vllm serve {model} "
            f"--host 0.0.0.0 --port {port} "
            f"--dtype bfloat16 "
@@ -482,25 +587,29 @@ def _start_vllm(sb: Sandbox, model: str, port: int, mem_util: float) -> None:
            f"--limit-mm-per-prompt '{{\"image\": 10}}' "
            f"--reasoning-parser qwen3 "
            f'--api-key "$PE_API_TOKEN" '
-           f"> {log} 2>&1 &")
+           f"> {log} 2>&1 </dev/null &)")
 
 
 def _start_marimo(sb: Sandbox, pe_t2i_url: str, pe_i2i_url: str) -> None:
     """(Re)start marimo detached. Tokens/keys come from the sandbox's creation
     env; only the non-secret PE URLs are injected here."""
+    _ensure_build_tools(sb)
     # NB: pkill -f patterns are regexes — keep them metachar-free.
     sh(sb, "pkill -f 'bin/marimo' || true")
     time.sleep(3)  # let the port free up
+    # `( ... </dev/null &)` isolation as in _start_vllm/run_long: without it the
+    # detached marimo inherits the exec session's fds and this sh() hangs until
+    # the SDK's 300 s exec timeout (observed live).
     sh(sb, f"mkdir -p {MOUNT}/wandb/cache {MOUNT}/wandb/config {MOUNT}/logs && "
            f"cd {MOUNT}/app && "
-           f"PE_T2I_URL={shlex.quote(pe_t2i_url)} PE_I2I_URL={shlex.quote(pe_i2i_url)} "
+           f"(PE_T2I_URL={shlex.quote(pe_t2i_url)} PE_I2I_URL={shlex.quote(pe_i2i_url)} "
            # the single GPU is entirely the pipeline's now (PEs live elsewhere)
            f"CUDA_VISIBLE_DEVICES=0 "
            f"nohup .venv/bin/marimo run app.py --host 0.0.0.0 --port {APP_PORT} "
            # endpoint is internet-reachable -> marimo token auth ON (the SSH
            # tunnel that used to justify --no-token is gone)
            f'--headless --watch --token --token-password "$APP_TOKEN" '
-           f"> {MOUNT}/logs/marimo.log 2>&1 &")
+           f"> {MOUNT}/logs/marimo.log 2>&1 </dev/null &)")
 
 
 def _finish_studio(studio: Sandbox, state: dict) -> None:
@@ -530,6 +639,7 @@ def cmd_up(_args) -> None:
         print(f"Reusing sandboxes studio={studio.sandbox_id} pe={pe.sandbox_id}")
         upload_code(studio)
         # uv sync is a near-no-op unless pyproject/uv.lock changed since seed
+        _ensure_build_tools(studio)
         run_long(studio, "uv-sync", f"cd {MOUNT}/app && {UV} sync", timeout=900)
         _start_marimo(studio, state["pe_t2i_url"], state["pe_i2i_url"])
         _finish_studio(studio, state)
@@ -572,6 +682,7 @@ def cmd_up(_args) -> None:
         _start_vllm(pe, PE_T2I_MODEL, PE_T2I_PORT, 0.45)
 
         upload_code(studio)  # snapshot code may be stale; local repo is truth
+        _ensure_build_tools(studio)
         run_long(studio, "uv-sync", f"cd {MOUNT}/app && {UV} sync", timeout=900)
         _start_marimo(studio, state["pe_t2i_url"], state["pe_i2i_url"])
 
@@ -605,6 +716,7 @@ def cmd_sync(_args) -> None:
     if not studio:
         sys.exit("studio sandbox is not running — use scripts/launch.sh")
     upload_code(studio)
+    _ensure_build_tools(studio)
     run_long(studio, "uv-sync", f"cd {MOUNT}/app && {UV} sync", timeout=900)
     _start_marimo(studio, state["pe_t2i_url"], state["pe_i2i_url"])
     _finish_studio(studio, state)
