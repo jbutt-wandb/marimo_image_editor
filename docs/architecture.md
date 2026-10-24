@@ -1,52 +1,73 @@
 # Architecture
 
-Image Studio is a marimo app served headless from a CoreWeave Slurm compute
-node and used from a Mac over an SSH tunnel. One Slurm job holds two H100s:
-GPU 0 runs the diffusers image pipeline inside the marimo process, GPU 1 hosts
-two vLLM servers for the official Qwen prompt-enhancement (PE) models. All
-observability goes to Weave (W&B / CoreWeave Forge).
+Image Studio runs on **two CoreWeave serverless GPU sandboxes** (serverless
+caps at 1 GPU per sandbox) and is used from a Mac over a tokenized public
+HTTPS URL. The **studio** sandbox runs marimo with the diffusers image
+pipeline in-process; the **pe** sandbox hosts two vLLM servers for the
+official Qwen prompt-enhancement (PE) models, sharing its single GPU. Both
+mount an instant fork of a filesystem snapshot (built once by seeding) at
+`/work`. All observability goes to Weave (W&B / CoreWeave Forge).
 
 ## Components
 
 ```
-┌─ Mac ───────────────────────────────┐
-│  browser → http://localhost:2718    │
-│  scripts/launch.sh · sync.sh ·      │
-│  stop.sh   (.env holds WANDB key)   │
-└───────┬──────────────┬──────────────┘
-        │ ssh tunnel   │ rsync + sbatch/srun via ssh
-        │ 2718         ▼
-        │      ┌─ coreweave-login ─┐
-        │      │  Slurm control    │
-        │      └─────────┬─────────┘
-        ▼                ▼
-┌─ compute node — Slurm job "$JOB_NAME" (2× H100 80GB, 24 h) ─────────────────┐
-│                                                                             │
-│  GPU 0                                   GPU 1                              │
-│  ┌─────────────────────────────┐         ┌─────────────────────────────┐    │
-│  │ marimo run app.py           │  HTTP   │ vLLM: …-PE-T2I  :8001       │    │
-│  │  --headless --watch :2718   │ ──────▶ │ vLLM: …-PE-I2I  :8002       │    │
-│  │ ├ OpenAI-Agents PE agents   │         │ (Qwen3.5-VL 9B rewriters,   │    │
-│  │ ├ QwenImage21Pipeline bf16  │         │  bf16, reasoning-parser     │    │
-│  │ │  (~38 GB resident,        │         │  qwen3, venv: vllm-env)     │    │
-│  │ │   ~66 GB peak @ 2K)       │         └─────────────────────────────┘    │
-│  │ └ weave tracing + dataset ──┼──▶ $WEAVE_PROJECT (from .env)              │
-│  └─────────────────────────────┘                                            │
-│                                                                             │
-│  $DATA_DIR/: qwen2.1/ (code + .venv, py3.10) · vllm-env/                    │
-│  (py3.12) · hf/ (model cache) · .wandb_key · *.log                          │
-└─────────────────────────────────────────────────────────────────────────────┘
+┌─ Mac ───────────────────────────────────────────────┐
+│  browser → https://2718-<studio-id>.…cwsandbox.com  │
+│            /?access_token=<APP_TOKEN>               │
+│  scripts/launch.sh · sync.sh · stop.sh              │
+│   (thin wrappers around scripts/sandbox.py)         │
+│  .env: CWSANDBOX_API_KEY (+ WANDB key, optional)    │
+│  .launch/sandbox-state.json: ids, URLs, tokens      │
+└───────┬─────────────────────────────┬───────────────┘
+        │ HTTPS :2718                 │ cwsandbox SDK: create /
+        │ (marimo token auth)         │ exec / upload code
+        ▼                             ▼
+┌─ sandbox "studio" (1 GPU) ───────┐    ┌─ sandbox "pe" (1 GPU) ──────────┐
+│ marimo run app.py                │    │ vLLM: …-PE-T2I  :8001 (0.45)    │
+│  --headless --watch :2718        │    │ vLLM: …-PE-I2I  :8002 (0.53)    │
+│  --token (APP_TOKEN)             │    │ (Qwen3.5-VL 9B rewriters, bf16, │
+│ ├ OpenAI-Agents PE agents ───────┼──▶ │  reasoning-parser qwen3,        │
+│ │   HTTPS + bearer PE_API_KEY    │    │  --api-key $PE_API_TOKEN,       │
+│ ├ QwenImage21Pipeline bf16       │    │  started sequentially)          │
+│ │   (~38 GB resident,            │    │                                 │
+│ │    ~66 GB peak @ 2K)           │    │ /work ◀─ snapshot fork          │
+│ └ weave tracing ──▶ $WEAVE_PROJECT    └─────────────────────────────────┘
+│                                  │
+│ /work ◀─ snapshot fork           │      one seeded FSS snapshot (200 Gi):
+└──────────────────────────────────┘      app/ (code + .venv py3.10) ·
+                                          vllm-env/ (py3.12) · hf/ (~80 GB
+                                          weights) · bin/uv · logs/
 ```
 
-The local repo is the source of truth; `scripts/sync.sh` pushes it to
-`$DATA_DIR/qwen2.1/`, which is what actually executes.
+The local repo is the source of truth; `launch.sh`/`sync.sh` tarball it to
+`/work/app` in the studio sandbox, which is what actually executes. Studio
+reaches the PE servers over their **public HTTPS endpoints**: the platform
+terminates TLS but does no caller auth, so vLLM enforces a bearer token
+(`--api-key`) and marimo runs with token auth on — the tokens live in the
+sandbox environments and in `.launch/sandbox-state.json` (chmod 600).
+
+## Launcher lifecycle
+
+All logic is in `scripts/sandbox.py` (a standalone uv PEP 723 script —
+cwsandbox needs Python ≥3.11 while the app venv is 3.10, so run it with
+`uv run --python 3.12 scripts/sandbox.py <cmd>`; the wrappers do this for
+you). State persists in `.launch/sandbox-state.json`.
+
+| Command | What happens |
+|---|---|
+| `sandbox.py probe` | ~1-min GPU entitlement check (GPU sandboxes are private preview): creates a 1-GPU sandbox, prints `nvidia-smi -L`, deletes it. Unentitled orgs fail at create in <2 s, nothing billed |
+| `launch.sh --seed` (`seed`) | One-time, **CPU-only** sandbox (~30–60 min): installs uv under `/work/bin`, uploads the repo, builds the app venv (`uv sync`, py 3.10) and a separate vLLM venv (py 3.12), downloads all three models into `/work/hf`, snapshots `/work`, saves `snapshot_id`, deletes the seed sandbox |
+| `launch.sh` (`up`) | Reuse if both sandboxes are RUNNING (re-push code, restart marimo); else create studio+pe **in parallel** (~1 min), each on a snapshot fork → start PE-T2I detached → upload code + `uv sync` + start marimo → wait for health (PE-I2I starts after T2I is healthy) → print+open the tokenized URL. Ready ~3–5 min. On failure, reaps everything by tag |
+| `sync.sh` (`sync`) | Push local code to the running studio sandbox, `uv sync` (no-op unless deps changed), restart marimo |
+| `stop.sh` (`down`) | Delete every sandbox tagged `image-studio` — billing stops; the snapshot is kept. `--delete-snapshot` also deletes the snapshot (next launch needs `--seed`) |
+| `sandbox.py status` | List this app's sandboxes with role, state, and URLs; show launch time and snapshot id |
 
 ## Request lifecycle — what happens when a user clicks Generate
 
 The same flow serves all four tabs (Create / Edit / Region / Multi-region);
 only the input assembly differs. Everything below runs inside the marimo
-process; `studio.generate(...)` is the per-click entry point and the Weave
-trace root.
+process on the studio sandbox; `studio.generate(...)` is the per-click entry
+point and the Weave trace root.
 
 1. **Input assembly (app.py)**
    - *Create*: just the prompt (+ aspect/resolution/transparent settings).
@@ -65,17 +86,19 @@ trace root.
 
 3. **Prompt enhancement (agent 1).** If the toggle is on (default), a
    **PromptEnhancer** agent — T2I for Create, I2I for the edit modes — runs
-   against the matching vLLM endpoint via the OpenAI Agents SDK
-   (`OpenAIChatCompletionsModel`; vLLM has no Responses API). This follows the
-   official Qwen PE protocol: vendored system prompts in
-   `src/qwen2_1/pe_prompts/`, images-first content order for I2I (downscaled
-   to ≤1024² data URLs), and per-task sampling — notably `presence_penalty`
-   1.5 (T2I) vs 0.0 (I2I), which is not interchangeable. The model answers
-   with reasoning followed by a JSON object; the code strips `</think>`, then
-   a **balanced-brace scanner** extracts the last valid JSON (tolerating the
-   `rewrited_prompt` typo from the training data) into
-   `{rewritten_prompt, wh_ratio, ratio_follow}`. Any failure — server down,
-   unparseable output, missing env URL — **fails open to the raw prompt**.
+   against the matching vLLM endpoint (`PE_T2I_URL` / `PE_I2I_URL`, the pe
+   sandbox's public HTTPS URLs, authenticated with the `PE_API_KEY` bearer
+   token) via the OpenAI Agents SDK (`OpenAIChatCompletionsModel`; vLLM has
+   no Responses API). This follows the official Qwen PE protocol: vendored
+   system prompts in `src/qwen2_1/pe_prompts/`, images-first content order
+   for I2I (downscaled to ≤1024² data URLs), and per-task sampling — notably
+   `presence_penalty` 1.5 (T2I) vs 0.0 (I2I), which is not interchangeable.
+   The model answers with reasoning followed by a JSON object; the code
+   strips `</think>`, then a **balanced-brace scanner** extracts the last
+   valid JSON (tolerating the `rewrited_prompt` typo from the training data)
+   into `{rewritten_prompt, wh_ratio, ratio_follow}`. Any failure — server
+   down, unparseable output, missing env URL — **fails open to the raw
+   prompt**.
 
 4. **Aspect resolution (Create only).** The "Auto" aspect choice maps the
    enhancer's suggested `wh_ratio` onto the nearest supported 2K resolution
@@ -84,11 +107,12 @@ trace root.
 5. **Image generation (agent 2).** A synthetic image-task agent
    (ImageGenerator / ImageEditor / RegionEditor / MultiRegionEditor per mode)
    wraps the diffusers call: `run_pipe` in `model.py` drives the singleton
-   `QwenImage21Pipeline` on GPU 0. Mode is implicit in `image=` (None / single
-   / list). The pipeline **loads lazily on the first generation** (~2–4 min,
-   ~38 GB bf16). CFG is only passed when `true_cfg_scale > 1` *and* a negative
-   prompt is set, since the pipeline ignores either alone. A random seed is
-   drawn if none was given and recorded.
+   `QwenImage21Pipeline` on the studio sandbox's GPU. Mode is implicit in
+   `image=` (None / single / list). The pipeline **loads lazily on the first
+   generation** (~2–4 min, ~38 GB bf16). CFG is only passed when
+   `true_cfg_scale > 1` *and* a negative prompt is set, since the pipeline
+   ignores either alone. A random seed is drawn if none was given and
+   recorded.
 
 6. **Recipe + display.** Every parameter needed to reproduce the result —
    final prompt, `original_prompt`, PE model, wh_ratio, seed, steps, CFG,
@@ -102,7 +126,7 @@ trace root.
    background thread (read–rebuild–republish, serialized by a lock; the
    server content-addresses media so unchanged images dedupe) and never
    raises into the app. **Weave is the system of record for outputs** —
-   images are not durably stored on cluster disk.
+   images are not durably stored on sandbox disk.
 
 8. **Trace root closes.** In the Weave UI the click appears as one trace
    containing the enhancer agent run and the pipeline op; the Agents tab lists
@@ -110,32 +134,37 @@ trace root.
 
 ## Compute requirements
 
-| Resource | Details |
-|---|---|
-| Slurm job | `$JOB_NAME` (default `<user>-interactive`), `sbatch --gres=gpu:h100:2 --mem=0 --cpus-per-task=16 --time=24:00:00`, wraps `sleep infinity`; services attach with `srun --overlap` |
-| GPU 0 | `Qwen/Qwen-Image-2.1` via diffusers (`QwenImage21Pipeline`, bf16): ~38 GB resident, **~66 GB peak during 2K inference** — exactly one process may hold it |
-| GPU 1 | 2× vLLM, bf16, `--max-num-seqs 16`, `--max-model-len 24576`, `--reasoning-parser qwen3`, `--limit-mm-per-prompt {"image": 10}` |
-| PE-T2I | `Qwen/Qwen-Image-2.1-PE-T2I` (Qwen3.5-VL 9B) — port **8001**, `--gpu-memory-utilization 0.45` |
-| PE-I2I | `Qwen/Qwen-Image-2.1-PE-I2I` (Qwen3.5-VL 9B) — port **8002**, `--gpu-memory-utilization 0.53` |
-| marimo | port **2718** on the node IP; reached via `ssh -N -L 2718:<node_ip>:2718` |
-| App venv | `$DATA_DIR/qwen2.1/.venv` — **uv-managed Python 3.10** (system python lacks dev headers → Triton JIT breaks) |
-| vLLM venv | `$DATA_DIR/vllm-env` — Python 3.12, separate from the app venv |
-| Storage | `$DATA_DIR/`: `qwen2.1/` (code), `hf/` (`HF_HOME` cache), `.wandb_key` (chmod 600), `wandb/` (W&B dirs), `*.log` |
+Both sandboxes: image `pytorch/pytorch:2.8.0-cuda12.8-cudnn9-runtime`
+(works on both GPU archs the pool serves), `placement_mode="serverless"`,
+`max_lifetime_seconds` 24 h, tags `image-studio` + `image-studio-<role>`,
+main command `sleep infinity` (servers launch detached), and a 200 Gi fork of
+the seeded snapshot at `/work`.
 
-Environment exported into the marimo process by `launch.sh`:
-`CUDA_VISIBLE_DEVICES=0`, `HF_HOME`, `PE_T2I_URL` / `PE_I2I_URL`
-(`http://<node_ip>:8001/8002`), `WANDB_API_KEY` (from `.wandb_key`),
-`WANDB_DIR`/`WANDB_CACHE_DIR`/`WANDB_CONFIG_DIR`, and
-`WEAVE_USE_SERVER_CACHE=false`.
+| | studio sandbox | pe sandbox |
+|---|---|---|
+| Resources | 16 CPU · 64 Gi · **1 GPU** | 16 CPU · 64 Gi · **1 GPU** |
+| GPU (pool is heterogeneous, not selectable) | H100 80 GB **or** RTX PRO 6000 Blackwell 96 GB | same |
+| Runs | `marimo run app.py --headless --watch` + `QwenImage21Pipeline` bf16 (~38 GB resident, **~66 GB peak @ 2K** — exactly one process may hold it) | vLLM × 2, bf16, `--max-num-seqs 16`, `--max-model-len 24576`, `--reasoning-parser qwen3`, `--limit-mm-per-prompt {"image": 10}` |
+| Ports (public HTTPS endpoints) | **2718** (app) | **8001** PE-T2I (`--gpu-memory-utilization 0.45`) · **8002** PE-I2I (`0.53`), started **sequentially** |
+| App-level auth | marimo `--token --token-password $APP_TOKEN` → URL carries `?access_token=…` | vLLM `--api-key $PE_API_TOKEN`; studio presents it as `PE_API_KEY` bearer |
+| Venv on `/work` | `app/.venv` — **uv-managed Python 3.10** | `vllm-env` — Python 3.12 |
+| Logs | `/work/logs/marimo.log` | `/work/logs/pe_8001.log`, `pe_8002.log` |
+
+Environment injected into the studio sandbox / marimo process by the
+launcher: `CUDA_VISIBLE_DEVICES=0`, `HF_HOME=/work/hf`, `APP_TOKEN`,
+`PE_API_KEY`, `PE_T2I_URL` / `PE_I2I_URL` (the pe sandbox's HTTPS endpoint
+URLs), `WANDB_API_KEY` + `WEAVE_PROJECT` (from the local `.env`, via sandbox
+`environment_variables` — never argv), `WANDB_DIR`/`WANDB_CACHE_DIR`/
+`WANDB_CONFIG_DIR` (under `/work/wandb`), and `WEAVE_USE_SERVER_CACHE=false`.
 
 ## Scripts
 
 | Script | Runs on | What it does |
 |---|---|---|
-| `scripts/launch.sh [--mode run\|edit] [--port N] [--no-sync]` | Mac | Full bring-up: sync → find-or-create the Slurm job (replaces a job with the wrong GPU count) → wait for RUNNING, resolve the node IP → health-check/start the PE servers → kill+restart marimo with the env above → open the tunnel. State (job id, node, pid) in `.launch/` |
-| `scripts/sync.sh [--deps]` | Mac | rsync push (excludes `.venv`, `.git`, `.env`, `outputs/`, caches); copies `WANDB_API_KEY` from `.env` to the chmod-600 cluster file; on `pyproject.toml`/`uv.lock` change runs remote `uv sync` and pulls the authoritative re-locked `uv.lock` back |
-| `scripts/stop.sh [--release]` | Mac | Kills the tunnel, `pkill`s marimo and vLLM inside the job; `--release` also `scancel`s the job |
-| `scripts/pe_server.sh <model> <host> <port> <mem_util>` | node | One vLLM server on GPU 1 (`CUDA_VISIBLE_DEVICES=1`), launched by `launch.sh` via `srun --overlap`; flags mirror the official `prompt_rewrite/serve.sh` |
+| `scripts/launch.sh [--seed]` | Mac | Default: `sandbox.py up` (create-or-reuse both sandboxes, start servers, print+open the tokenized URL). `--seed`: `sandbox.py seed` (one-time snapshot build) |
+| `scripts/sync.sh` | Mac | `sandbox.py sync` — tarball-push the repo to `/work/app` on the running studio sandbox (excludes `.venv .git .env outputs .launch` + caches), conditional `uv sync`, restart marimo |
+| `scripts/stop.sh [--delete-snapshot]` | Mac | `sandbox.py down` — delete all `image-studio` sandboxes (billing stops; snapshot kept unless `--delete-snapshot`) |
+| `uv run --python 3.12 scripts/sandbox.py <probe\|status>` | Mac | Entitlement probe / sandbox listing (no wrapper; note the explicit `--python 3.12`) |
 
 ## Failure and fallback behavior
 
@@ -143,34 +172,54 @@ Environment exported into the marimo process by `launch.sh`:
 |---|---|
 | No `WANDB_API_KEY` / weave init error | App runs untraced; `weave.op`s execute as plain functions; dataset logging is a no-op |
 | PE server down / unreachable / bad JSON | `enhance_prompt` fails open: the raw user prompt goes straight to the pipeline (`enhanced: false` in the recipe) |
-| PE servers never become healthy at launch | `launch.sh` warns and continues — the app still works with raw prompts |
+| PE servers never become healthy at launch | `up` warns and continues — the app still works with raw prompts; check `/work/logs/pe_*.log` on the pe sandbox |
+| Only one of the two sandboxes still alive | `up` deletes the survivor and recreates both (a half pair can't serve) |
+| Launch fails partway | `up` reaps every `image-studio` sandbox before re-raising, so nothing keeps billing |
+| marimo doesn't come up | `up` exits with a pointer to `/work/logs/marimo.log` |
 | Dataset append fails | Logged (`logger.exception`) and swallowed; generation already succeeded. If the previous dataset version can't be loaded, a fresh single-row version is published loudly (older versions remain recoverable) |
-| Existing job has wrong GPU count | `launch.sh` cancels and resubmits (a Slurm job can't be grown) |
-| marimo doesn't come up | `launch.sh` exits with a pointer to `marimo.log` |
 | Guidance without negative prompt (or vice versa) | Pipeline ignores it — the app only forwards CFG when both are set |
+| Org not entitled to GPU sandboxes | Creation fails in <2 s with "not entitled" (nothing billed) — run `sandbox.py probe` first; access via your CoreWeave account team |
 
 ## Known gotchas
 
-- **One model per GPU 0.** The pipeline is ~38 GB resident and peaks ~66 GB at
-  2K on an 80 GB H100 — exactly one process may hold it (it's a module-level
-  singleton in `model.py` for this reason). A second loader OOMs both.
-- **marimo `--watch` reloads `app.py` only.** Changes under `src/` need a
-  marimo restart: `scripts/launch.sh --no-sync` (or a full `launch.sh`).
-- **SQLite on network filesystems.** `/mnt/data` is networked storage; Weave's
-  local server cache (sqlite) misbehaves there, hence
-  `WEAVE_USE_SERVER_CACHE=false` in the launch env. Keep it.
-- **`pkill -f` patterns are regexes.** The project path contains `+`, so a
-  naive `pkill -f <path>` silently never matches. The scripts match on
-  `bin/marimo` / `bin/vllm` instead — keep new patterns metachar-free.
+- **1 GPU per serverless sandbox, heterogeneous pool.** The 1-GPU cap is why
+  the app is split into two sandboxes. The pool hands out H100 80 GB
+  (`sm_90`) **or** RTX PRO 6000 Blackwell 96 GB (`sm_120`) — not selectable —
+  so the image and wheels must support both archs (CUDA 12.8 + PyTorch ≥2.7
+  cu128 builds do). Budget VRAM for the 80 GB case.
+- **Snapshots capture only the mount.** Nothing outside `/work` survives into
+  a fork — not the container image's changes, processes, or GPU memory.
+  Everything the app needs at runtime (venvs, uv itself, `HF_HOME`, logs)
+  lives under `/work`; there is no "snapshot a loaded model".
+- **Never run a server via attached `exec`** — it dies at the SDK's ~300 s
+  request timeout. Servers start detached (`nohup … &`) with `sleep infinity`
+  as the sandbox's main command; long steps (seeding, `uv sync`) run detached
+  with sentinel-file polling (`run_long` in `sandbox.py`).
+- **Public endpoints do zero platform auth.** The platform terminates TLS and
+  forwards every request — so every exposed service authenticates itself:
+  marimo token auth (the `?access_token=` URL) and vLLM `--api-key`. Never
+  disable these.
+- **Services/ports are fixed at creation.** No post-hoc port exposure —
+  `sandbox.py` declares 2718 / 8001+8002 when creating each sandbox. A new
+  port means recreating the sandbox.
+- **Default sandbox lifetime is 600 s.** An unset `max_lifetime_seconds`
+  kills a sandbox after 10 minutes; `sandbox.py` sets 24 h deliberately — it
+  doubles as the billing backstop if you forget `scripts/stop.sh` (which you
+  should still run: sandboxes bill per ms while up).
+- **One process owns the pipeline GPU.** ~38 GB resident, ~66 GB peak at 2K —
+  the pipeline is a module-level singleton in `model.py`; a second loader
+  OOMs both.
 - **vLLM `--gpu-memory-utilization` semantics.** It is this server's budget as
   a fraction of **TOTAL** GPU memory, and vLLM requires that much to be
-  **FREE at startup**. Two servers sharing GPU 1 therefore use 0.45 then 0.53,
-  and must start **sequentially** — concurrent startup races the free-memory
-  profiling and the KV-cache sizing.
-- **uv-managed Python only** (3.10, `UV_PYTHON_PREFERENCE=only-managed`).
-  Compute nodes' system python lacks the dev headers Triton's JIT needs.
-- **Node IP changes per allocation.** `launch.sh` resolves it from
-  `scontrol show node` each run and wires it into the PE URLs and tunnel;
-  don't hardcode it.
-- **`uv.lock` is re-locked remotely.** After a remote `uv sync`, the cluster's
-  lock is authoritative and `sync.sh` copies it back — don't hand-edit locally.
+  **FREE at startup**. The two PE servers share one GPU, so T2I takes 0.45,
+  I2I takes 0.53, and they must start **sequentially** — concurrent startup
+  races the free-memory profiling and the KV-cache sizing.
+- **marimo `--watch` reloads `app.py` only.** Changes under `src/` need a
+  marimo restart: `scripts/sync.sh` pushes the code and restarts it.
+- **uv-managed Python only** (`UV_PYTHON_PREFERENCE=only-managed`, installed
+  under `/work/uv-python`). Container pythons vary per image and a venv keyed
+  to one would break on snapshot restore; managed interpreters also carry the
+  dev headers Triton's JIT needs.
+- **`.launch/sandbox-state.json` holds secrets** (app access token, PE bearer
+  token) — chmod 600, gitignored; never commit it. Deleting it orphans the
+  reuse path, but `scripts/stop.sh` can still reap by tag.

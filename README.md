@@ -2,10 +2,11 @@
 
 A [marimo](https://marimo.io) web app for working with instruction-driven image
 models — text-to-image, instruction editing, multi-reference composition, and
-draw-on-image region editing — running on a CoreWeave Slurm cluster (2× H100)
-and used from your Mac through an SSH tunnel. The hosted model is
+draw-on-image region editing — running on **CoreWeave serverless GPU sandboxes**
+(two sandboxes, one GPU each) and used from your Mac through a tokenized public
+HTTPS URL that the launcher prints and opens for you. The hosted model is
 **Qwen-Image-2.1**, fronted by the official Qwen prompt-enhancement models and
-orchestrated as agents (OpenAI Agents SDK), with every generation traced to Forge Weave. You can view the traces 
+orchestrated as agents (OpenAI Agents SDK), with every generation traced to Forge Weave. You can view the traces
 [here](https://wandb.ai/wandb-smle/jb_image_editing_tool/weave).
 
 For a deeper understanding of how the app works and the underlying model and architecture, please read below.
@@ -17,7 +18,8 @@ For a deeper understanding of how the app works and the underlying model and arc
 
 ## How the App Works
 
-A quick tour of the running app at <http://localhost:2718>, captured live.
+A quick tour of the running app at the tokenized URL `scripts/launch.sh`
+prints, captured live.
 
 ### 1. Describe what you want
 
@@ -41,7 +43,7 @@ always the latest run.
 ![Generated night cabin image with Download button and seed caption](docs/images/create-result.jpg)
 
 The finished image arrives with a **Download** button (served straight from
-memory — nothing is written to cluster disk) and a caption recording the seed
+memory — nothing is written to sandbox disk) and a caption recording the seed
 and that the prompt was enhanced. Auto aspect chose 3:2 (1248×832) for this
 prompt. The whole run also lands in
 [Weave](https://wandb.ai/wandb-smle/jb_image_editing_tool/weave) as a trace
@@ -73,8 +75,10 @@ the pipeline).
 
 ## Setup (first time)
 
-One-time, from a fresh Mac; day-to-day use is just [Running it](#running-it).
-This local repo is the **source of truth**; the cluster copy executes.
+One-time, from a fresh Mac; day-to-day use is just
+[Once Setup - Run the Following](#once-setup---run-the-following).
+This local repo is the **source of truth**; the sandboxes execute a copy the
+scripts push to them.
 
 1. **Clone the repo and install [uv](https://docs.astral.sh/uv/) locally:**
 
@@ -83,82 +87,51 @@ This local repo is the **source of truth**; the cluster copy executes.
    curl -LsSf https://astral.sh/uv/install.sh | sh
    ```
 
-2. **SSH config.** The scripts reach the cluster exclusively through the host
-   alias `coreweave-login` (override with `SSH_HOST=<alias>`). Add to
-   `~/.ssh/config`:
+   uv is the only local prerequisite — the scripts use it to run the launcher
+   in its own isolated environment.
 
-   ```
-   Host coreweave-login
-       HostName <cluster-login-node>
-       User <your-cluster-username>
-   ```
-
-   ```bash
-   ssh coreweave-login true   # must succeed (silently)
-   ```
-
-3. **Your `.env`.** Create `.env` in the repo root (gitignored) — these values
-   are **yours**, not shared with other developers:
+2. **CoreWeave API key + your `.env`.** Create a console token with the
+   **"Sandbox User"** IAM role at
+   [console.coreweave.com/tokens](https://console.coreweave.com/tokens), then
+   create `.env` in the repo root (gitignored) — these values are **yours**,
+   not shared with other developers:
 
    ```bash
-   echo 'WANDB_API_KEY=<your Forge/W&B key>' > .env
+   echo 'CWSANDBOX_API_KEY=<your CoreWeave console token>' > .env
+   echo 'WANDB_API_KEY=<your Forge/W&B key>' >> .env
    echo 'WEAVE_PROJECT=<your-entity/your-project>' >> .env
-   echo 'CLUSTER_USER=<your-cluster-account>' >> .env   # e.g. jdoe+org01
    ```
 
-   `scripts/sync.sh` copies the key — outside the rsync tree — into a
-   chmod-600 file on the cluster (`$DATA_DIR/.wandb_key`);
-   `scripts/launch.sh` reads `WEAVE_PROJECT` from `.env` and exports it into
-   the remote marimo process, so changing it in `.env` and relaunching
-   switches tracing projects. The key and project are optional: without them
-   the app runs identically but untraced. `CLUSTER_USER` is also optional —
-   the scripts fall back to `ssh coreweave-login whoami` — but setting it
-   skips that round-trip.
+   `CWSANDBOX_API_KEY` is **required** — it is how the launcher creates and
+   drives the sandboxes. `WANDB_API_KEY` and `WEAVE_PROJECT` are optional:
+   the launcher passes them into the app's sandbox environment, so changing
+   them in `.env` and relaunching switches tracing projects; without them the
+   app runs identically but untraced.
 
-   All cluster settings resolve per-user in `scripts/config.sh`
-   (override any of them in `.env` or the environment):
-
-   | Variable | Default |
-   |---|---|
-   | `CLUSTER_USER` | `ssh $SSH_HOST whoami` |
-   | `DATA_DIR` | `/mnt/data/$CLUSTER_USER` |
-   | `JOB_NAME` | `<user-without-+suffix>-interactive` |
-   | `SSH_HOST` | `coreweave-login` |
-
-   Everything below writes to **your** `$DATA_DIR` — the examples use
-   `/mnt/data/$CLUSTER_USER`; substitute your account.
-
-4. **Cluster prerequisites.** One-time, under your own `$DATA_DIR`. Check
-   what already exists:
+3. **GPU entitlement probe (optional but recommended).** GPU sandboxes are a
+   private preview — your CoreWeave organization must be allowlisted. This
+   ~1-minute check creates a 1-GPU sandbox, prints the GPU model it landed
+   on, and tears it down (costs cents):
 
    ```bash
-   ssh coreweave-login 'ls /mnt/data/$(whoami)'
-   # want: bin/ (uv) · qwen2.1/ (project + .venv) · vllm-env/ · hf/
+   uv run --python 3.12 scripts/sandbox.py probe
    ```
 
-   Create whatever is missing:
+   If it fails with "not entitled to create GPU sandboxes" (within ~2
+   seconds, nothing billed), ask your CoreWeave account team for GPU-sandbox
+   access before continuing.
 
-   - **`bin/uv`** — the uv binary the scripts use for remote dependency syncs.
-   - **`qwen2.1/` + app venv** — project copy with a **uv-managed Python 3.10**
-     venv; created by the remote `uv sync` that `scripts/sync.sh` performs
-     (force it with `scripts/sync.sh --deps`).
-   - **`vllm-env/`** — separate venv for the PE servers (Python 3.12):
+4. **One-time seeding:**
 
-     ```bash
-     ssh coreweave-login
-     cd /mnt/data/$(whoami)
-     bin/uv venv --python 3.12 vllm-env
-     bin/uv pip install --python vllm-env/bin/python vllm ninja
-     ```
+   ```bash
+   scripts/launch.sh --seed
+   ```
 
-   - **`hf/`** — model weights pre-downloaded into `HF_HOME`, e.g.:
-
-     ```bash
-     export HF_HOME=/mnt/data/$(whoami)/hf
-     hf download Qwen/Qwen-Image-2.1           # image pipeline (GPU 0)
-     hf download Qwen/Qwen-Image-2.1-PE-T2I    # prompt enhancers (GPU 1)
-     hf download Qwen/Qwen-Image-2.1-PE-I2I
-     ```
+   This builds the app's persistent disk once, on a cheap CPU-only sandbox:
+   both Python venvs plus ~80 GB of model weights go into a 200 Gi
+   filesystem snapshot. Expect **~30–60 min**, with a one-line progress
+   heartbeat per minute. Every later launch mounts an instant fork of this
+   snapshot, which is why day-to-day launches are fast.
 
 5. **First launch:**
 
@@ -166,57 +139,75 @@ This local repo is the **source of truth**; the cluster copy executes.
    scripts/launch.sh
    ```
 
-   Expect, in order: Slurm job allocation, PE servers **~5–10 min** cold (two
-   9B models load sequentially on GPU 1; `launch.sh` continues even if they
-   fail — the app then uses raw prompts), marimo start, then the tunnel and:
+   Expect, in order: both sandboxes created in parallel (~1 min), code
+   pushed to the studio sandbox, the two prompt-enhancement vLLM servers
+   loading sequentially (**~2–4 min**; `launch.sh` continues even if they
+   fail — the app then uses raw prompts), marimo start, then:
 
    ```
-   ✅ ready: http://localhost:2718  (mode: run, job <id> on <node>)
+   ✅ ready: https://2718-<sandbox-id>.<hash>.cwsandbox.com/?access_token=<token>
    ```
 
-   Open <http://localhost:2718>. The first generation loads the image pipeline
-   lazily — allow **~2–4 min** (~38 GB bf16 onto GPU 0); later generations
-   skip this.
+   Ready end-to-end in **~3–5 min**. On macOS the URL opens automatically;
+   the `access_token` in it is required — the endpoint is on the public
+   internet and marimo's token auth is the access control. The first
+   generation loads the image pipeline lazily — allow **~2–4 min** (~38 GB
+   bf16 onto the GPU); later generations skip this.
 
 6. **Sanity checks:**
 
    ```bash
-   ssh coreweave-login 'tail -f /mnt/data/$(whoami)/marimo.log'   # stage logs
+   uv run --python 3.12 scripts/sandbox.py status
+   # studio  <sandbox-id>  RUNNING  https://2718-…cwsandbox.com
+   # pe      <sandbox-id>  RUNNING  https://8001-…  https://8002-…
+   # launched: <timestamp>
+   # snapshot: <snapshot-id>
    ```
 
-   and, after one generation, confirm a trace landed in your `WEAVE_PROJECT`
-   at `https://wandb.ai/<your-entity/your-project>/weave`.
+   Service logs live inside each sandbox under `/work/logs/`
+   (`marimo.log` on studio; `pe_8001.log`, `pe_8002.log` on pe). To tail
+   them, exec into the sandbox with the cwsandbox CLI
+   (`pip install 'cwsandbox[cli]'`, then its `exec` command with the sandbox
+   id from `status`). After one generation, confirm a trace landed in your
+   `WEAVE_PROJECT` at `https://wandb.ai/<your-entity/your-project>/weave`.
 
 ## Once Setup - Run the Following
 
 ```bash
 # One command, from the repo root on your Mac:
 scripts/launch.sh
-# 1. rsync the repo to the cluster (scripts/sync.sh)
-# 2. find or submit the 2-GPU Slurm job (name $JOB_NAME, 24 h)
-# 3. health-check / start the two prompt-enhancement vLLM servers on GPU 1
-# 4. (re)start marimo on GPU 0 with all env wired up
-# 5. open the SSH tunnel localhost:2718 -> compute node
-
-# then open:
-open http://localhost:2718
+# 1. reuse the running sandboxes if both are still up; otherwise create the
+#    studio + pe sandboxes in parallel, each on a fork of the seeded snapshot
+# 2. push this repo's code to the studio sandbox (local repo is truth)
+# 3. start the two prompt-enhancement vLLM servers on the pe sandbox
+# 4. (re)start marimo on the studio sandbox with all env wired up
+# 5. print + open the tokenized URL:
+#    https://2718-<sandbox-id>.<hash>.cwsandbox.com/?access_token=<token>
 ```
 
 Variants and teardown:
 
 ```bash
-scripts/launch.sh --mode edit   # editable marimo notebook UI instead of the app
-scripts/launch.sh --no-sync     # skip the rsync (also the way to restart marimo
-                                # after changing code under src/)
-scripts/sync.sh                 # push code only; app.py hot-reloads via --watch
-scripts/stop.sh                 # stop marimo + PE servers + tunnel, KEEP the GPU job
-scripts/stop.sh --release       # ... and cancel the Slurm job (frees both GPUs)
+scripts/sync.sh                      # push code to the running studio sandbox
+                                     # and restart marimo (changes under src/
+                                     # need this; app.py alone hot-reloads
+                                     # via --watch)
+scripts/stop.sh                      # delete both sandboxes — billing stops;
+                                     # the snapshot is KEPT for fast relaunch
+scripts/stop.sh --delete-snapshot    # ... and delete the snapshot too
+                                     # (the next launch needs --seed again)
+uv run --python 3.12 scripts/sandbox.py status   # list sandboxes, URLs, snapshot
 ```
 
-A cold start (fresh Slurm job) repeats the setup-step-5 timings: ~5–10 min for
-the PE servers, ~2–4 min pipeline load on the first generation. Logs live on
-the cluster next to the project: `marimo.log`, `pe_t2i.log`, `pe_i2i.log` in
-your `$DATA_DIR`.
+**Billing note.** Serverless sandboxes bill **per millisecond while running**
+(CPU-core-hr and GiB-hr rates; GPU rates via your account team) — run
+`scripts/stop.sh` when you're done. The 24 h `max_lifetime` on each sandbox is
+a server-enforced auto-kill backstop, not a substitute for stopping. The
+snapshot itself is billed per GiB-hr of storage; keep it (fast relaunches) or
+drop it with `--delete-snapshot`.
+
+Launcher state — sandbox ids, URLs, and the access tokens — lives in
+`.launch/sandbox-state.json` (chmod 600, gitignored). Never commit it.
 
 ## Tracing
 
@@ -227,5 +218,5 @@ nest under a per-click root, agents appear in the Agents tab, and each output
 image is appended — with its full parameter recipe and base64 input/output
 images — to the versioned `image-generation-log` dataset, which doubles as
 distillation/fine-tuning data. Weave is the system of record for generated
-images; nothing is durably stored on cluster disk. Without the key, the app
+images; nothing is durably stored on sandbox disk. Without the key, the app
 runs identically but untraced.
